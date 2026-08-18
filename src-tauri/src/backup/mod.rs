@@ -180,12 +180,17 @@ impl BackupStore {
         let blobs = self.directory(id).join(BLOBS);
         let known: HashSet<&Path> = manifest.entries.iter().map(Entry::path).collect();
 
-        // Directories first: entries are ordered by path, so a parent is always
-        // re-created before anything that lives inside it.
+        // Directories first: entries are ordered by path (see `read_manifest`),
+        // so a parent is always re-created before anything that lives inside it.
+        // Force an owner-writable working mode here: a captured directory
+        // restored to (or surviving at) 0555 would otherwise block
+        // `fsx::copy_atomic`'s sibling temp file. The final pass below puts
+        // the captured mode back.
         for entry in &manifest.entries {
             if let Entry::Directory { path, .. } = entry {
                 clear_conflict(path, true)?;
                 fsx::create_dir_all_private(path)?;
+                apply_mode(path, Some(0o700))?;
             }
         }
 
@@ -218,9 +223,10 @@ impl BackupStore {
             }
         }
 
-        // Modes last: content is in place, so a captured 0444 file or 0555
-        // directory cannot block the writes above. Created-but-uncaptured
-        // parents keep the private default from `create_dir_all_private`.
+        // Modes last: the directories-first pass forced 0700 so writes could
+        // proceed; this pass reapplies the captured mode, including 0444 files
+        // and 0555 directories. Created-but-uncaptured parents keep the
+        // private default from `create_dir_all_private`.
         for entry in &manifest.entries {
             match entry {
                 Entry::File { path, mode, .. } | Entry::Directory { path, mode } => {
@@ -321,12 +327,27 @@ impl BackupStore {
         let mut candidate = format!("{provider_id}-{stamp}");
         for attempt in 2.. {
             let id = BackupId::parse(&candidate)?;
-            match fs::create_dir(self.directory(&id)) {
+            let directory = self.directory(&id);
+            // `create_dir` failing on an existing name is the immutability
+            // rule; the mode is set at creation so a umask cannot leave the
+            // backup directory group- or world-readable (T6).
+            let created = {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    fs::DirBuilder::new().mode(0o700).create(&directory)
+                }
+                #[cfg(not(unix))]
+                {
+                    fs::create_dir(&directory)
+                }
+            };
+            match created {
                 Ok(()) => return Ok(id),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     candidate = format!("{provider_id}-{stamp}-{attempt}");
                 }
-                Err(error) => return Err(fsx::io_at(&self.directory(&id), error)),
+                Err(error) => return Err(fsx::io_at(&directory, error)),
             }
         }
         unreachable!("the candidate name changes on every attempt")
@@ -386,7 +407,14 @@ impl BackupStore {
                 ),
             ));
         }
-        Ok(serde_json::from_slice(&bytes)?)
+        let mut manifest: Manifest = serde_json::from_slice(&bytes)?;
+        // Parent-before-child is a restore invariant, not a property of the
+        // bytes on disk. The writer emits BTreeMap order; a shuffled or
+        // hand-edited manifest must still restore.
+        manifest
+            .entries
+            .sort_by(|left, right| left.path().cmp(right.path()));
+        Ok(manifest)
     }
 }
 
@@ -828,6 +856,7 @@ mod tests {
         let directory = store.directory(&id);
         let mode = |path: &Path| fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode(&store.root), 0o700);
+        assert_eq!(mode(&directory), 0o700);
         assert_eq!(mode(&directory.join(BLOBS)), 0o700);
         assert_eq!(mode(&directory.join(MANIFEST)), 0o400);
         for blob in fs::read_dir(directory.join(BLOBS)).expect("blobs") {
@@ -910,6 +939,75 @@ mod tests {
             mode(&file),
             0o600,
             "a mode-less manifest must keep the fsx default"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_survives_an_owner_read_only_captured_directory_twice() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let dir = home.join("sessions");
+        fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("state.json");
+        fs::write(&file, b"captured").expect("write");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("chmod dir");
+
+        let store = store(temp.path());
+        let paths = [dir.clone()];
+        let id = store.snapshot("codex-cli", &paths).expect("snapshot");
+
+        let mode = |path: &Path| fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+
+        store.restore(&id).expect("first restore");
+        assert_eq!(read(&file), b"captured");
+        assert_eq!(mode(&dir), 0o555);
+
+        store.restore(&id).expect("second restore");
+        assert_eq!(read(&file), b"captured");
+        assert_eq!(mode(&dir), 0o555);
+    }
+
+    #[test]
+    fn restore_accepts_a_manifest_whose_entries_are_shuffled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = fixture(temp.path());
+        let store = store(temp.path());
+        let id = store.snapshot("claude-code", &paths).expect("snapshot");
+
+        let manifest = store.directory(&id).join(MANIFEST);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&read(&manifest)).expect("manifest json");
+        let entries = value
+            .get_mut("entries")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("entries");
+        assert!(
+            entries.len() > 1,
+            "fixture must have more than one entry to shuffle"
+        );
+        entries.reverse();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).expect("unseal");
+        }
+        fs::write(
+            &manifest,
+            serde_json::to_vec_pretty(&value).expect("rewrite json"),
+        )
+        .expect("rewrite");
+
+        fs::write(paths[0].join("config.json"), b"clobbered").expect("mutate");
+        store.restore(&id).expect("restore shuffled");
+
+        assert_eq!(read(&paths[0].join("config.json")), b"{\"active\":\"one\"}");
+        assert_eq!(read(&paths[1]), b"legacy");
+        assert_eq!(
+            read(&paths[0].join("agents/notes.md")),
+            b"FAKE-access-token-0001"
         );
     }
 }
