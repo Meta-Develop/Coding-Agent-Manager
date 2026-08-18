@@ -55,6 +55,7 @@ use base64::Engine;
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::{CredentialStore, Secret, SecretRef};
@@ -161,7 +162,6 @@ impl EncryptedFileStore {
 
     fn save_map(&self, map: &SecretMap) -> Result<()> {
         let passphrase = self.passphrase()?;
-        refuse_newer_existing(&self.path)?;
         let encoded = encrypt_map(map, passphrase)?;
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -186,26 +186,29 @@ impl CredentialStore for EncryptedFileStore {
 
     fn put(&self, key: &SecretRef, secret: &Secret) -> Result<()> {
         let mut map = self.load_map()?;
-        map.0.insert(key.0.clone(), secret.expose().to_vec());
+        if let Some(mut previous) = map.0.insert(key.0.clone(), secret.expose().to_vec()) {
+            previous.zeroize();
+        }
         self.save_map(&map)
     }
 
     fn get(&self, key: &SecretRef) -> Result<Option<Secret>> {
-        if !self.path.is_file() {
-            return Ok(None);
-        }
         let mut map = self.load_map()?;
         Ok(map.0.remove(&key.0).map(Secret::new))
     }
 
     fn delete(&self, key: &SecretRef) -> Result<()> {
-        // Deleting what is not there is a success, including when the file
-        // itself has not been created yet — same contract as the keychain.
+        // Passphrase first: a locked store must not report success just
+        // because the file is missing. The file-existence check after that
+        // avoids creating an empty store when there is nothing to delete.
+        self.passphrase()?;
         if !self.path.is_file() {
             return Ok(());
         }
         let mut map = self.load_map()?;
-        map.0.remove(&key.0);
+        if let Some(mut previous) = map.0.remove(&key.0) {
+            previous.zeroize();
+        }
         self.save_map(&map)
     }
 }
@@ -265,9 +268,21 @@ impl KdfParams {
     }
 }
 
+/// The part of an envelope that must be readable at every schema version.
+///
+/// Parsed before the strict [`Envelope`] so a newer file with a renamed
+/// field is refused as newer, not misreported as corrupt.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SchemaProbe {
+    schema_version: u32,
+}
+
 fn decrypt_map(path: &Path, bytes: &[u8], passphrase: &Secret) -> Result<SecretMap> {
+    let probe: SchemaProbe = serde_json::from_slice(bytes).map_err(|_| corrupt(path))?;
+    refuse_newer_schema(path, probe.schema_version)?;
+
     let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| corrupt(path))?;
-    refuse_newer_schema(path, envelope.schema_version)?;
     if envelope.schema_version < 1 {
         return Err(corrupt(path));
     }
@@ -324,17 +339,6 @@ fn encrypt_map(map: &SecretMap, passphrase: &Secret) -> Result<Vec<u8>> {
     serde_json::to_vec_pretty(&envelope).map_err(|_| {
         Error::CredentialStoreUnavailable("could not serialise the credential envelope".to_owned())
     })
-}
-
-fn refuse_newer_existing(path: &Path) -> Result<()> {
-    match fs::read(path) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(crate::fsx::io_at(path, error)),
-        Ok(bytes) => {
-            let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|_| corrupt(path))?;
-            refuse_newer_schema(path, envelope.schema_version)
-        }
-    }
 }
 
 fn refuse_newer_schema(path: &Path, schema_version: u32) -> Result<()> {
@@ -451,16 +455,10 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
-/// Length is public (fixed). The XOR-fold is constant-time in the bytes so a
-/// wrong passphrase does not leak the check via an early exit.
+/// Length is public (fixed). Compared in constant time so a wrong passphrase
+/// does not leak the check via an early exit.
 fn ct_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-        == 0
+    left.ct_eq(right).into()
 }
 
 fn wrong_passphrase(path: &Path) -> Error {
@@ -546,6 +544,25 @@ mod tests {
         let store = EncryptedFileStore::new(dir.path().join(FILE_NAME));
         assert!(!store.is_available());
         assert_eq!(store.id(), "encrypted-file");
+    }
+
+    #[test]
+    fn locked_store_errors_on_get_and_delete_when_the_file_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(FILE_NAME);
+        let store = EncryptedFileStore::new(path.clone());
+        assert!(!path.is_file(), "the locked-store file must not exist");
+
+        let get_message = get_err(&store, &key()).to_string();
+        assert!(get_message.contains("locked"), "{get_message}");
+        assert_no_leak(&get_message);
+
+        let delete_message = match store.delete(&key()) {
+            Ok(()) => panic!("delete succeeded on a locked missing file"),
+            Err(error) => error.to_string(),
+        };
+        assert!(delete_message.contains("locked"), "{delete_message}");
+        assert_no_leak(&delete_message);
     }
 
     #[test]
@@ -648,6 +665,34 @@ mod tests {
         assert!(write_message.contains("schema version"), "{write_message}");
         assert!(write_message.contains("refusing"), "{write_message}");
         assert_no_leak(&write_message);
+    }
+
+    #[test]
+    fn newer_schema_with_a_renamed_field_is_refused_not_corrupt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = unlocked(&dir);
+        store
+            .put(&key(), &Secret::new(TOKEN.to_vec()))
+            .expect("put");
+
+        let path = dir.path().join(FILE_NAME);
+        let raw = fs::read(&path).expect("read envelope");
+        let mut envelope: serde_json::Value = serde_json::from_slice(&raw).expect("json");
+        envelope["schemaVersion"] = serde_json::json!(SCHEMA_VERSION + 1);
+        let ciphertext = envelope
+            .as_object_mut()
+            .expect("object")
+            .remove("ciphertext")
+            .expect("ciphertext");
+        envelope["payload"] = ciphertext;
+        fs::write(&path, serde_json::to_vec(&envelope).expect("rewrite")).expect("write");
+
+        let error = get_err(&store, &key());
+        let message = error.to_string();
+        assert!(message.contains("schema version"), "{message}");
+        assert!(message.contains("refusing"), "{message}");
+        assert!(!message.contains("corrupt"), "{message}");
+        assert_no_leak(&message);
     }
 
     #[cfg(unix)]

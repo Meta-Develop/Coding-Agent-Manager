@@ -106,14 +106,14 @@ pub fn default_store() -> Result<Box<dyn CredentialStore>> {
     // `EncryptedFileStore::is_available()` must stay `false` until a passphrase
     // has actually unlocked the file; returning `true` before then would make
     // this function hand back a store that fails on first use, which is exactly
-    // what it exists to prevent. Constructing the store differently (a
-    // passphrase-carrying constructor, say) only changes this one expression.
-    let candidates: Vec<Box<dyn CredentialStore>> = vec![
-        Box::new(keychain::KeychainStore),
-        Box::new(encrypted_file::EncryptedFileStore::new(
-            encrypted_file::EncryptedFileStore::default_path().unwrap_or_default(),
-        )),
-    ];
+    // what it exists to prevent. The encrypted-file candidate is included only
+    // when `default_path()` resolves; a resolution failure falls through to
+    // the same refusal as "nothing available", rather than constructing a
+    // store at the empty path.
+    let mut candidates: Vec<Box<dyn CredentialStore>> = vec![Box::new(keychain::KeychainStore)];
+    if let Ok(path) = encrypted_file::EncryptedFileStore::default_path() {
+        candidates.push(Box::new(encrypted_file::EncryptedFileStore::new(path)));
+    }
     first_available(candidates)
 }
 
