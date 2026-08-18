@@ -457,11 +457,11 @@ fn record_unavailable_stores(out: &mut Vec<(String, String)>) {
         Err(error) => record_error(out, "default_store when nothing is available", error),
     }
 
-    let locked_file = tempfile::NamedTempFile::new().expect("locked store file");
+    let locked_dir = tempfile::tempdir().expect("locked store dir");
     exercise_unavailable(
         out,
         "EncryptedFileStore",
-        &EncryptedFileStore::new(locked_file.path().to_path_buf()),
+        &EncryptedFileStore::new(locked_dir.path().join("credentials.enc.json")),
     );
     exercise_unavailable(out, "KeychainStore", &KeychainStore);
 }

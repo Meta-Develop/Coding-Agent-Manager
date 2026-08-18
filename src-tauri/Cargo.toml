@@ -46,6 +46,8 @@ chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 # Encodes the binary fields of the encrypted-file JSON envelope. Held at 0.22 to
 # match the version `keyring` already pulls in rather than adding a second copy.
 base64 = "0.22"
+# Already in the tree via password-hash; this adds no new compiled code.
+subtle = "2"
 # RFC 3339 timestamps: backup file names (NFR-4) and `QuotaSnapshot.captured_at`.
 time = { version = "0.3", features = ["formatting", "parsing"] }
 
