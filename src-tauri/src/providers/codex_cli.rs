@@ -330,7 +330,16 @@ mod tests {
 
     #[test]
     fn list_accounts_rejects_malformed_auth_json() {
-        let home = staged_home("home-malformed");
+        // Written here rather than stored as a `.json` fixture: Prettier parses
+        // tracked `*.json` and refuses this intentionally invalid document.
+        let home = tempfile::tempdir().expect("tempdir");
+        let auth_dir = home.path().join(".codex");
+        fs::create_dir_all(&auth_dir).expect("mkdir .codex");
+        fs::write(
+            auth_dir.join("auth.json"),
+            r#"{this is not json, "OPENAI_API_KEY": "FAKE-malformed-key-0001""#,
+        )
+        .expect("write malformed auth.json");
         let adapter = CodexCliAdapter::with_home(home.path());
         let error = adapter
             .list_accounts()
