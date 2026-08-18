@@ -6,7 +6,7 @@ authors = ["Meta-Develop"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Meta-Develop/Coding-Agent-Manager"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 
 [lib]
 # The `_lib` suffix keeps the desktop binary and the library target from
