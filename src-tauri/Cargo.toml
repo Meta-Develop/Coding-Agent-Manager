@@ -25,7 +25,10 @@ serde_json = "1"
 thiserror = "2"
 directories = "6"
 # Zeroes secret material on drop; `Secret` needs a real implementation (ADR 0003).
-zeroize = "1.8"
+# `zeroize_derive` is spelled out because `Secret`'s zeroing guarantee is a
+# derive, and relying on another crate's feature to supply it breaks on every
+# platform where that crate's Linux-only backend is inactive.
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # OS credential service: macOS Keychain, Windows Credential Manager, Secret Service.
 # Every feature below is target-gated inside `keyring`, so one entry serves all
 # three CI platforms: on Linux only `sync-secret-service` and `crypto-rust` have
