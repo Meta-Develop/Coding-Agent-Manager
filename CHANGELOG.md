@@ -38,6 +38,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   encryption, a verifier that reports a wrong passphrase separately from a
   tampered file, and a refusal to read or write a newer schema version. There is
   still no plaintext mode, behind any flag (`FR-3`, `NFR-1`).
+- Read-only Codex CLI and Grok CLI adapters: each lists the accounts stored in
+  that tool's `auth.json`. Switching is not implemented yet.
 
 ### Changed
 
@@ -49,7 +51,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Notes
 
 The credential stores and the backup machinery are implemented and exercised by
-the M1 exit-criteria suite. No provider adapter is functional yet. Switching
-accounts arrives with the first adapters. See `docs/ROADMAP.md`.
+the M1 exit-criteria suite. Codex CLI and Grok CLI can list accounts; they
+cannot switch them. See `docs/ROADMAP.md`.
 
 [Unreleased]: https://github.com/Meta-Develop/Coding-Agent-Manager/commits/main
