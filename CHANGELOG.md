@@ -24,9 +24,32 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   glossary, provider matrix, five provider research notes, and six ADRs.
 - `flake.nix` dev shell providing the Tauri v2 Linux prerequisites.
 - CI across Linux, macOS, and Windows; release workflow for all platform bundles.
+- Backup subsystem: timestamped snapshots over an adapter's declared config
+  paths, restore that returns the tree to its captured state including files
+  that were absent and Unix permission bits, and retention that never prunes a
+  provider's newest backup (`NFR-4`).
+- Atomic write helper that every config write goes through: temporary file,
+  `fsync`, rename, and owner-only permissions at creation (`NFR-4`).
+- OS-keychain credential store for macOS Keychain, Windows Credential Manager,
+  and Freedesktop Secret Service, with error mapping that never forwards stored
+  bytes (`FR-3`, `NFR-1`).
+- Encrypted-file fallback store: Argon2id key derivation from a user passphrase
+  with its parameters recorded in the file, ChaCha20-Poly1305 authenticated
+  encryption, a verifier that reports a wrong passphrase separately from a
+  tampered file, and a refusal to read or write a newer schema version. There is
+  still no plaintext mode, behind any flag (`FR-3`, `NFR-1`).
+
+### Changed
+
+- Declared minimum supported Rust version raised to 1.88, matching what the
+  dependency tree already required.
+- Linux CI dependency list now names `libdbus-1-dev` explicitly rather than
+  relying on it arriving transitively.
 
 ### Notes
 
-No provider adapter is functional yet. See `docs/ROADMAP.md`.
+The credential stores and the backup machinery are implemented and exercised by
+the M1 exit-criteria suite. No provider adapter is functional yet. Switching
+accounts arrives with the first adapters. See `docs/ROADMAP.md`.
 
 [Unreleased]: https://github.com/Meta-Develop/Coding-Agent-Manager/commits/main
