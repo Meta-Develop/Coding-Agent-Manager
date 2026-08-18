@@ -41,6 +41,10 @@ jobs:
       - name: Install Linux build dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
+          # libdbus-1-dev: the keyring crate links native libdbus for the
+          # Secret Service backend. Today that package arrives only
+          # transitively through libwebkit2gtk-4.1-dev; trimming this list
+          # must not silently break the build.
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -48,6 +52,7 @@ jobs:
             librsvg2-dev \
             libsoup-3.0-dev \
             libsecret-1-dev \
+            libdbus-1-dev \
             patchelf
 
       - uses: dtolnay/rust-toolchain@stable
@@ -89,8 +94,9 @@ jobs:
           fetch-depth: 0
       - name: No credential-shaped literals in tracked files
         run: |
-          # Fixtures use an explicit FAKE- prefix; anything else that looks like
-          # a live token is a release blocker. See docs/TESTING.md.
+          # Fixture values use the FAKE- prefix and must never embed a
+          # vendor-shaped prefix. This regex is not exempted for FAKE-.
+          # See docs/TESTING.md.
           if grep -rInE '(sk-[A-Za-z0-9]{20,}|xai-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{30,})' \
                --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=target . ; then
             echo "::error::credential-shaped literal found in tracked files"
