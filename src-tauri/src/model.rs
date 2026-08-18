@@ -11,6 +11,8 @@ pub type ProviderId = &'static str;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuthKind {
+    /// serde kebab-case would emit `"o-auth"`; the webview type is `"oauth"`.
+    #[serde(rename = "oauth")]
     OAuth,
     ApiKey,
     Unknown,
@@ -81,4 +83,78 @@ pub struct QuotaSnapshot {
     pub resets_at: Option<String>,
     pub captured_at: String,
     pub source: QuotaSource,
+}
+
+// Wire values are shared with `src/types/index.ts`. Change both sides together.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_kind_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&AuthKind::OAuth).unwrap(),
+            r#""oauth""#
+        );
+        assert_eq!(
+            serde_json::to_string(&AuthKind::ApiKey).unwrap(),
+            r#""api-key""#
+        );
+        assert_eq!(
+            serde_json::to_string(&AuthKind::Unknown).unwrap(),
+            r#""unknown""#
+        );
+    }
+
+    #[test]
+    fn install_state_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&InstallState::Installed).unwrap(),
+            r#""installed""#
+        );
+        assert_eq!(
+            serde_json::to_string(&InstallState::NotInstalled).unwrap(),
+            r#""not-installed""#
+        );
+        assert_eq!(
+            serde_json::to_string(&InstallState::Unknown).unwrap(),
+            r#""unknown""#
+        );
+    }
+
+    #[test]
+    fn maturity_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&Maturity::Planned).unwrap(),
+            r#""planned""#
+        );
+        assert_eq!(
+            serde_json::to_string(&Maturity::Experimental).unwrap(),
+            r#""experimental""#
+        );
+        assert_eq!(
+            serde_json::to_string(&Maturity::Supported).unwrap(),
+            r#""supported""#
+        );
+    }
+
+    #[test]
+    fn quota_source_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&QuotaSource::LocalFile).unwrap(),
+            r#""local-file""#
+        );
+        assert_eq!(
+            serde_json::to_string(&QuotaSource::Api).unwrap(),
+            r#""api""#
+        );
+        assert_eq!(
+            serde_json::to_string(&QuotaSource::Header).unwrap(),
+            r#""header""#
+        );
+        assert_eq!(
+            serde_json::to_string(&QuotaSource::Unknown).unwrap(),
+            r#""unknown""#
+        );
+    }
 }
