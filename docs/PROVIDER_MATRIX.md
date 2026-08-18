@@ -17,12 +17,17 @@ listed in each research note.
 
 ## What this implies for sequencing
 
+Codex CLI and Grok CLI now list accounts from their on-disk `auth.json` files.
+Neither adapter writes: Codex switching strategies are `[inferred]`, and how
+Grok CLI selects the active identity is `[unknown]`. The remaining order is
+unchanged.
+
 1. **Codex CLI first.** It is the only provider whose entire credential state is
-   one readable document, which makes it the cheapest way to prove the adapter
-   contract, the backup subsystem, and the switch verification path end to end.
-2. **Grok CLI second.** Its multi-identity file exercises the "several accounts
-   coexist" case that the domain model assumes, and forces the advisory-lock
-   handling that other adapters will also need.
+   one readable document. Listing that document is in place. The switch
+   verification path is still the cheapest remaining end-to-end proof.
+2. **Grok CLI second.** Its multi-identity file already exercises the "several
+   accounts coexist" case that the domain model assumes. Switching still needs
+   the advisory-lock handling that other adapters will also need.
 3. **Claude Code third.** It introduces the two-file switch, which is the first
    case where atomicity across more than one file actually matters.
 4. **Gemini CLI fourth**, starting with the API-key path, which is file-free and
