@@ -6,7 +6,8 @@
 //! commands  ->  providers | storage | relay | router
 //! providers ->  storage | backup | fsx
 //! relay     ->  router -> providers
-//! backup    ->  fsx
+//! backup    ->  fsx | paths
+//! storage   ->  paths
 //! ```
 //!
 //! Nothing below `commands` may depend on Tauri types, so the core stays
@@ -17,6 +18,7 @@ pub mod commands;
 pub mod error;
 pub mod fsx;
 pub mod model;
+pub mod paths;
 pub mod providers;
 pub mod relay;
 pub mod router;

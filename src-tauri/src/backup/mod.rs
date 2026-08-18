@@ -423,8 +423,7 @@ impl BackupStore {
 /// Never called from a constructor: a [`BackupStore`] always takes its root, so
 /// no code path can reach a user's data directory by default.
 pub fn default_root() -> Option<PathBuf> {
-    directories::ProjectDirs::from("dev", "metadevelop", "coding-agent-manager")
-        .map(|dirs| dirs.data_dir().join("backups"))
+    crate::paths::project_dirs().map(|dirs| dirs.data_dir().join("backups"))
 }
 
 /// What a captured path was at snapshot time.

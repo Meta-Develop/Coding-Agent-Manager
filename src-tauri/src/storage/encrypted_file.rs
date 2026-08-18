@@ -133,7 +133,7 @@ impl EncryptedFileStore {
     /// Never called from a constructor: a store always takes its path, so no
     /// test can reach a user's data directory by accident.
     pub fn default_path() -> Result<PathBuf> {
-        directories::ProjectDirs::from("dev", "metadevelop", "coding-agent-manager")
+        crate::paths::project_dirs()
             .map(|dirs| dirs.data_dir().join(FILE_NAME))
             .ok_or_else(|| {
                 Error::CredentialStoreUnavailable(

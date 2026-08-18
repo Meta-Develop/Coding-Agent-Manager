@@ -27,7 +27,7 @@ platforms.
 
 ---
 
-## M1 — Safe foundations
+## M1 — Safe foundations ✅
 
 **Goal.** The machinery that makes writing to someone's config defensible.
 
