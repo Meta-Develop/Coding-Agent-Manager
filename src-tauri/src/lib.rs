@@ -4,16 +4,21 @@
 //!
 //! ```text
 //! commands  ->  providers | storage | relay | router
-//! providers ->  storage
+//! providers ->  storage | backup | fsx
 //! relay     ->  router -> providers
+//! backup    ->  fsx | paths
+//! storage   ->  paths
 //! ```
 //!
 //! Nothing below `commands` may depend on Tauri types, so the core stays
 //! testable without a webview and reusable from a future headless binary.
 
+pub mod backup;
 pub mod commands;
 pub mod error;
+pub mod fsx;
 pub mod model;
+pub mod paths;
 pub mod providers;
 pub mod relay;
 pub mod router;

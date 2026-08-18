@@ -6,7 +6,7 @@ authors = ["Meta-Develop"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Meta-Develop/Coding-Agent-Manager"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 
 [lib]
 # The `_lib` suffix keeps the desktop binary and the library target from
@@ -24,6 +24,35 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 directories = "6"
+# Zeroes secret material on drop; `Secret` needs a real implementation (ADR 0003).
+# `zeroize_derive` is spelled out because `Secret`'s zeroing guarantee is a
+# derive, and relying on another crate's feature to supply it breaks on every
+# platform where that crate's Linux-only backend is inactive.
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+# OS credential service: macOS Keychain, Windows Credential Manager, Secret Service.
+# Every feature below is target-gated inside `keyring`, so one entry serves all
+# three CI platforms: on Linux only `sync-secret-service` and `crypto-rust` have
+# any effect, on macOS only `apple-native`, on Windows only `windows-native`.
+keyring = { version = "3", features = [
+  "apple-native",
+  "windows-native",
+  "sync-secret-service",
+  "crypto-rust",
+] }
+# Derives the encrypted-file fallback store's key from a user passphrase (ADR 0003).
+# Default features carry `password-hash/rand_core`, which supplies the salt, so no
+# separate random-number crate is needed.
+argon2 = { version = "0.5", features = ["std"] }
+# AEAD for the encrypted-file fallback store. `getrandom` (a default feature)
+# supplies keys and nonces; `zeroize` wipes the cipher state after use.
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
+# Encodes the binary fields of the encrypted-file JSON envelope. Held at 0.22 to
+# match the version `keyring` already pulls in rather than adding a second copy.
+base64 = "0.22"
+# Already in the tree via password-hash; this adds no new compiled code.
+subtle = "2"
+# RFC 3339 timestamps: backup file names (NFR-4) and `QuotaSnapshot.captured_at`.
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 [dev-dependencies]
 tempfile = "3"
