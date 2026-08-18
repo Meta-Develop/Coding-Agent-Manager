@@ -21,15 +21,40 @@ use crate::error::{Error, Result};
 use crate::model::{Account, AuthKind, InstallState, Maturity, ProviderDescriptor};
 
 #[derive(Debug, Default)]
-pub struct CodexCliAdapter;
+pub struct CodexCliAdapter {
+    /// Injected home directory. `None` means the real user home, which is
+    /// what production uses; tests pass a `tempfile::TempDir` path so no
+    /// test can read a developer's real credentials (`docs/TESTING.md` §4).
+    home: Option<PathBuf>,
+}
 
 impl CodexCliAdapter {
+    /// Root this adapter at `home` instead of the real user home.
+    pub fn with_home(home: impl Into<PathBuf>) -> Self {
+        Self {
+            home: Some(home.into()),
+        }
+    }
+
+    fn resolved_home(&self) -> Option<PathBuf> {
+        self.home.clone().or_else(home_dir)
+    }
+
     /// Honours `CODEX_HOME` before falling back to `~/.codex`.
+    ///
+    /// An injected root wins over `CODEX_HOME` so a test is never affected by
+    /// the developer's own `CODEX_HOME` (`docs/TESTING.md` §4). Production
+    /// leaves `home` unset, so the documented `[verified-docs]` override still
+    /// precedes `~/.codex`. Order: injected root, then `CODEX_HOME`, then
+    /// `~/.codex`.
     fn codex_home(&self) -> Option<PathBuf> {
+        if self.home.is_some() {
+            return self.resolved_home().map(|home| home.join(".codex"));
+        }
         if let Some(explicit) = std::env::var_os("CODEX_HOME") {
             return Some(PathBuf::from(explicit));
         }
-        home_dir().map(|home| home.join(".codex"))
+        self.resolved_home().map(|home| home.join(".codex"))
     }
 }
 
@@ -71,5 +96,31 @@ impl ProviderAdapter for CodexCliAdapter {
 
     fn activate_account(&self, _account_id: &str) -> Result<()> {
         Err(Error::NotImplemented("codex-cli::activate_account"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderAdapter;
+    use super::*;
+
+    #[test]
+    fn with_home_resolves_config_paths_under_the_injected_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let adapter = CodexCliAdapter::with_home(dir.path());
+        let paths = adapter.config_paths();
+
+        assert!(
+            !paths.is_empty(),
+            "config_paths must not go silent under an injected home"
+        );
+        for path in paths {
+            assert!(
+                path.starts_with(dir.path()),
+                "{path} escaped the injected home {home}",
+                path = path.display(),
+                home = dir.path().display()
+            );
+        }
     }
 }
