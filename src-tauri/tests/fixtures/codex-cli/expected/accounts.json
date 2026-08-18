@@ -1,0 +1,11 @@
+[
+  {
+    "id": "codex-cli-on-disk",
+    "providerId": "codex-cli",
+    "label": "Codex CLI",
+    "maskedIdentity": "****0001",
+    "authKind": "oauth",
+    "isActive": true,
+    "expiresAt": null
+  }
+]
