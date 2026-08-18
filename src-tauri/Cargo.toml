@@ -1,0 +1,40 @@
+[package]
+name = "coding-agent-manager"
+version = "0.1.0"
+description = "Unified account, credential, and quota manager for AI coding agents."
+authors = ["Meta-Develop"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Meta-Develop/Coding-Agent-Manager"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+# The `_lib` suffix keeps the desktop binary and the library target from
+# colliding on Windows. See https://v2.tauri.app/
+name = "coding_agent_manager_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+directories = "6"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Enabled by tauri-build; do not remove.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
