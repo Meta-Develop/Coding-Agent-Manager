@@ -390,7 +390,14 @@ mod tests {
 
     #[test]
     fn malformed_auth_json_is_config_read() {
-        let (_tmp, adapter) = adapter_over_fixture("malformed");
+        // Written here rather than stored as a `.json` fixture: Prettier parses
+        // tracked `*.json` and refuses this intentionally invalid document.
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_auth(
+            temp.path(),
+            r#"{"https://auth.example.invalid::aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0001":{"refresh_token":"FAKE-refresh-token-malformed""#,
+        );
+        let adapter = GrokCliAdapter::with_home(temp.path());
         let err = adapter.list_accounts().expect_err("malformed must fail");
         assert!(
             matches!(err, Error::ConfigRead { ref provider, .. } if provider == PROVIDER_ID),
