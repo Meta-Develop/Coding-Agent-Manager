@@ -1,0 +1,84 @@
+//! Provider-agnostic domain types.
+//!
+//! These are mirrored in TypeScript at `src/types/index.ts`. Change both sides
+//! together; `docs/ARCHITECTURE.md` describes the contract.
+
+use serde::{Deserialize, Serialize};
+
+/// Stable identifier for a managed agent tool, e.g. `claude-code`.
+pub type ProviderId = &'static str;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthKind {
+    OAuth,
+    ApiKey,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstallState {
+    Installed,
+    NotInstalled,
+    Unknown,
+}
+
+/// How complete an adapter is. Surfaced in the UI so users are never misled
+/// about what the application can actually do for a given tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Maturity {
+    Planned,
+    Experimental,
+    Supported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderDescriptor {
+    pub id: String,
+    pub display_name: String,
+    pub vendor: String,
+    pub auth_kinds: Vec<AuthKind>,
+    pub maturity: Maturity,
+    pub install_state: InstallState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    /// Assigned by this application, never by the vendor.
+    pub id: String,
+    pub provider_id: String,
+    /// User-chosen label. Must never contain a secret.
+    pub label: String,
+    /// Vendor identity, already masked for display (e.g. `a***@example.com`).
+    pub masked_identity: Option<String>,
+    pub auth_kind: AuthKind,
+    pub is_active: bool,
+    /// RFC 3339 timestamp, when the adapter can determine one.
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuotaSource {
+    LocalFile,
+    Api,
+    Header,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaSnapshot {
+    pub account_id: String,
+    pub model: Option<String>,
+    /// Fraction of the window consumed, 0.0..=1.0, or `None` when the provider
+    /// exposes no usable signal. Never fabricate a value here.
+    pub utilization: Option<f32>,
+    pub resets_at: Option<String>,
+    pub captured_at: String,
+    pub source: QuotaSource,
+}
