@@ -60,6 +60,11 @@ use crate::fsx;
 /// A manifest carrying a higher version is refused rather than parsed as best
 /// it can be: an older build must never restore a newer build's backup on a
 /// guess (`docs/ARCHITECTURE.md` §7).
+///
+/// File and Directory entries may carry an optional `mode` field. The field
+/// is skipped when absent. `schema_version` stays 1: nothing has shipped, no
+/// external backup exists, and a mode-less manifest must keep restoring
+/// exactly as today (fsx defaults).
 const SCHEMA_VERSION: u32 = 1;
 
 const MANIFEST: &str = "manifest.json";
@@ -178,14 +183,14 @@ impl BackupStore {
         // Directories first: entries are ordered by path, so a parent is always
         // re-created before anything that lives inside it.
         for entry in &manifest.entries {
-            if let Entry::Directory { path } = entry {
+            if let Entry::Directory { path, .. } = entry {
                 clear_conflict(path, true)?;
                 fsx::create_dir_all_private(path)?;
             }
         }
 
         for entry in &manifest.entries {
-            if let Entry::File { path, blob } = entry {
+            if let Entry::File { path, blob, .. } = entry {
                 if let Some(parent) = path.parent() {
                     fsx::create_dir_all_private(parent)?;
                 }
@@ -203,13 +208,25 @@ impl BackupStore {
         // Finally, anything that appeared inside a captured directory after the
         // snapshot was taken is not part of the state being restored.
         for entry in &manifest.entries {
-            if let Entry::Directory { path } = entry {
+            if let Entry::Directory { path, .. } = entry {
                 for child in fs::read_dir(path).map_err(|error| fsx::io_at(path, error))? {
                     let child = child.map_err(|error| fsx::io_at(path, error))?.path();
                     if !known.contains(child.as_path()) {
                         remove_path(&child)?;
                     }
                 }
+            }
+        }
+
+        // Modes last: content is in place, so a captured 0444 file or 0555
+        // directory cannot block the writes above. Created-but-uncaptured
+        // parents keep the private default from `create_dir_all_private`.
+        for entry in &manifest.entries {
+            match entry {
+                Entry::File { path, mode, .. } | Entry::Directory { path, mode } => {
+                    apply_mode(path, *mode)?;
+                }
+                Entry::Absent { .. } => {}
             }
         }
 
@@ -329,14 +346,14 @@ impl BackupStore {
         let mut entries = Vec::with_capacity(captured.len());
         for (index, (path, kind)) in captured.into_iter().enumerate() {
             entries.push(match kind {
-                Kind::File => {
+                Kind::File { mode } => {
                     let blob = format!("{index:05}");
                     let target = blobs.join(&blob);
                     fsx::copy_atomic(&path, &target)?;
                     seal(&target)?;
-                    Entry::File { path, blob }
+                    Entry::File { path, blob, mode }
                 }
-                Kind::Directory => Entry::Directory { path },
+                Kind::Directory { mode } => Entry::Directory { path, mode },
                 Kind::Absent => Entry::Absent { path },
             });
         }
@@ -386,23 +403,34 @@ pub fn default_root() -> Option<PathBuf> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum Entry {
-    File { path: PathBuf, blob: String },
-    Directory { path: PathBuf },
-    Absent { path: PathBuf },
+    File {
+        path: PathBuf,
+        blob: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+    },
+    Directory {
+        path: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
+    },
+    Absent {
+        path: PathBuf,
+    },
 }
 
 impl Entry {
     fn path(&self) -> &Path {
         match self {
-            Self::File { path, .. } | Self::Directory { path } | Self::Absent { path } => path,
+            Self::File { path, .. } | Self::Directory { path, .. } | Self::Absent { path } => path,
         }
     }
 }
 
 /// [`Entry`] before blob names have been assigned.
 enum Kind {
-    File,
-    Directory,
+    File { mode: Option<u32> },
+    Directory { mode: Option<u32> },
     Absent,
 }
 
@@ -450,11 +478,21 @@ fn capture(provider_id: &str, path: &Path, out: &mut BTreeMap<PathBuf, Kind>) ->
 
     let file_type = metadata.file_type();
     if file_type.is_file() {
-        out.insert(path.to_path_buf(), Kind::File);
+        out.insert(
+            path.to_path_buf(),
+            Kind::File {
+                mode: captured_mode(&metadata),
+            },
+        );
         return Ok(());
     }
     if file_type.is_dir() {
-        out.insert(path.to_path_buf(), Kind::Directory);
+        out.insert(
+            path.to_path_buf(),
+            Kind::Directory {
+                mode: captured_mode(&metadata),
+            },
+        );
         let children = fs::read_dir(path)
             .map_err(|error| read_failed(provider_id, format!("{}: {error}", path.display())))?;
         for child in children {
@@ -499,6 +537,45 @@ fn remove_path(path: &Path) -> Result<()> {
         Err(error) => return Err(fsx::io_at(path, error)),
     };
     removed.map_err(|error| fsx::io_at(path, error))
+}
+
+/// Unix permission bits of a captured file or directory, if this platform
+/// has them. Absent on non-Unix, and written as an omitted JSON field so a
+/// mode-less manifest stays valid.
+fn captured_mode(metadata: &fs::Metadata) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Some(metadata.permissions().mode() & 0o777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
+/// Reapply a captured mode after the path's content is in place.
+///
+/// A missing `mode` is a no-op: that is the mode-less manifest, which must
+/// keep the fsx defaults (`0600` files, `0700` directories created here).
+/// Non-Unix is a no-op for the same reason `seal` is.
+fn apply_mode(path: &Path, mode: Option<u32>) -> Result<()> {
+    let Some(mode) = mode else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|error| fsx::io_at(path, error))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        let _ = mode;
+    }
+    Ok(())
 }
 
 /// Make a written backup file read-only on Unix.
@@ -756,5 +833,83 @@ mod tests {
         for blob in fs::read_dir(directory.join(BLOBS)).expect("blobs") {
             assert_eq!(mode(&blob.expect("blob").path()), 0o400);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_reapplies_captured_file_and_directory_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("home");
+        let file = home.join("config.toml");
+        fs::write(&file, b"settings").expect("write");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("chmod file");
+        let dir = home.join("sessions");
+        fs::create_dir(&dir).expect("dir");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmod dir");
+
+        let store = store(temp.path());
+        let id = store
+            .snapshot("codex-cli", &[file.clone(), dir.clone()])
+            .expect("snapshot");
+
+        fs::write(&file, b"clobbered").expect("mutate");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).expect("narrow file");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("narrow dir");
+
+        store.restore(&id).expect("restore");
+
+        let mode = |path: &Path| fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(read(&file), b"settings");
+        assert_eq!(mode(&file), 0o644);
+        assert_eq!(mode(&dir), 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_manifest_without_mode_still_restores_with_fsx_defaults() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("home");
+        let file = home.join("config.toml");
+        fs::write(&file, b"settings").expect("write");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("chmod file");
+
+        let store = store(temp.path());
+        let paths = [file.clone()];
+        let id = store.snapshot("codex-cli", &paths).expect("snapshot");
+
+        let manifest = store.directory(&id).join(MANIFEST);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&read(&manifest)).expect("manifest json");
+        let entries = value
+            .get_mut("entries")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("entries");
+        for entry in entries {
+            entry.as_object_mut().expect("entry object").remove("mode");
+        }
+        let stripped = serde_json::to_vec_pretty(&value).expect("rewrite json");
+        assert!(
+            !String::from_utf8_lossy(&stripped).contains("\"mode\""),
+            "mode field must be gone from the rewritten manifest"
+        );
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).expect("unseal");
+        fs::write(&manifest, stripped).expect("rewrite");
+
+        fs::write(&file, b"clobbered").expect("mutate");
+        store.restore(&id).expect("restore");
+
+        let mode = |path: &Path| fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(read(&file), b"settings");
+        assert_eq!(
+            mode(&file),
+            0o600,
+            "a mode-less manifest must keep the fsx default"
+        );
     }
 }
