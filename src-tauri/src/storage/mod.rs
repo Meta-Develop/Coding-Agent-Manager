@@ -110,7 +110,9 @@ pub fn default_store() -> Result<Box<dyn CredentialStore>> {
     // passphrase-carrying constructor, say) only changes this one expression.
     let candidates: Vec<Box<dyn CredentialStore>> = vec![
         Box::new(keychain::KeychainStore),
-        Box::new(encrypted_file::EncryptedFileStore),
+        Box::new(encrypted_file::EncryptedFileStore::new(
+            encrypted_file::EncryptedFileStore::default_path().unwrap_or_default(),
+        )),
     ];
     first_available(candidates)
 }
