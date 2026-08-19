@@ -397,11 +397,7 @@ function AccountTable({
       )}
       <div className="mt-3 w-0 min-w-full overflow-x-auto">
         <table
-          className={
-            showExpires
-              ? 'accounts-table has-expires text-left text-sm'
-              : 'accounts-table text-left text-sm'
-          }
+          className="accounts-table text-left text-sm"
           aria-labelledby={headingId}
           aria-describedby={activeKnown ? undefined : unknownActiveId}
         >
@@ -415,23 +411,23 @@ function AccountTable({
           </colgroup>
           <thead className="text-xs uppercase tracking-wide text-ink-muted">
             <tr>
-              <th scope="col" className="py-2 pr-4 pl-3">
+              <th scope="col" className="py-2 pr-3 pl-3">
                 Label
               </th>
-              <th scope="col" className="py-2 pr-4">
+              <th scope="col" className="py-2 pr-3">
                 Identity
               </th>
-              <th scope="col" className="py-2 pr-4">
+              <th scope="col" className="py-2 pr-3">
                 Auth
               </th>
               <th
                 scope="col"
-                className={showExpires || showActions ? 'py-2 pr-4' : 'py-2'}
+                className={showExpires || showActions ? 'py-2 pr-3' : 'py-2'}
               >
                 Status
               </th>
               {showExpires && (
-                <th scope="col" className={showActions ? 'py-2 pr-4' : 'py-2'}>
+                <th scope="col" className={showActions ? 'py-2 pr-3' : 'py-2'}>
                   Expires
                 </th>
               )}
@@ -463,14 +459,14 @@ function AccountTable({
                     <th
                       id={labelId}
                       scope="row"
-                      className="py-2 pr-4 pl-3 text-left font-medium"
+                      className="py-2 pr-3 pl-3 text-left font-medium"
                       title={
                         account.label.trim() === '' ? undefined : account.label
                       }
                     >
                       {presentOrAbsent(account.label, 'No label')}
                     </th>
-                    <td className="py-2 pr-4 text-ink-muted">
+                    <td className="py-2 pr-3 text-ink-muted">
                       {account.isIncomplete
                         ? 'No usable credential'
                         : presentOrAbsent(
@@ -478,12 +474,14 @@ function AccountTable({
                             'Not established',
                           )}
                     </td>
-                    <td className="py-2 pr-4 text-ink-muted">
+                    <td className="py-2 pr-3 whitespace-nowrap text-ink-muted">
                       {account.authKind}
                     </td>
                     <td
                       className={
-                        showExpires || showActions ? 'py-2 pr-4' : 'py-2'
+                        showExpires || showActions
+                          ? 'py-2 pr-3 whitespace-nowrap'
+                          : 'py-2 whitespace-nowrap'
                       }
                     >
                       {statusCell(account, activeKnown)}
@@ -492,7 +490,7 @@ function AccountTable({
                       <td
                         className={
                           showActions
-                            ? 'py-2 pr-4 text-ink-muted'
+                            ? 'py-2 pr-3 text-ink-muted'
                             : 'py-2 text-ink-muted'
                         }
                       >
@@ -500,7 +498,7 @@ function AccountTable({
                       </td>
                     )}
                     {showActions && (
-                      <td className="py-2">
+                      <td className="py-2 whitespace-nowrap">
                         {pendingKind === null && (
                           <AccountActions
                             account={account}
@@ -607,8 +605,10 @@ function hasExpiry(account: Account): boolean {
 }
 
 /**
- * Render an expiry for a person, not a log. Unparseable values are shown
- * as the adapter produced them — they may not be timestamps at all.
+ * Render an expiry for a person, not a log. Date and time sit on two
+ * nowrap lines so the column is only as wide as the date. Unparseable
+ * values are shown as the adapter produced them — they may not be
+ * timestamps at all.
  */
 function formatExpiry(value: string | null): ReactNode {
   if (value === null || value.trim() === '') {
@@ -618,13 +618,17 @@ function formatExpiry(value: string | null): ReactNode {
   if (Number.isNaN(parsed)) {
     return value
   }
-  const readable = new Intl.DateTimeFormat(undefined, {
+  const date = new Date(parsed)
+  const datePart = new Intl.DateTimeFormat(undefined, {
     dateStyle: 'medium',
+  }).format(date)
+  const timePart = new Intl.DateTimeFormat(undefined, {
     timeStyle: 'short',
-  }).format(new Date(parsed))
+  }).format(date)
   return (
-    <time dateTime={value} title={value}>
-      {readable}
+    <time dateTime={value} title={value} className="expiry">
+      <span>{datePart}</span>
+      <span>{timePart}</span>
     </time>
   )
 }
@@ -639,15 +643,19 @@ function accountRowClass(isActive: boolean): string {
 /**
  * Incomplete is a structural fact about the stored directory, not a
  * missing active-account probe. Say that first so a blank identity is
- * not the only clue. `isActive: false` on every complete row is still
- * not a negative check — only say "Active" when at least one row is
- * marked active. The word "Active" is the state, not the colour.
+ * not the only clue. The visible label is the one word "Incomplete" so
+ * the status cell stays on one line; the rest of the sentence is the
+ * `title`, and the identity cell already says there is no usable
+ * credential. `isActive: false` on every complete row is still not a
+ * negative check — only say "Active" when at least one row is marked
+ * active. The word "Active" is the state, not the colour.
  */
 function statusCell(account: Account, activeKnown: boolean): ReactNode {
   if (account.isIncomplete) {
+    const detail = 'Incomplete — sign-in never finished'
     return (
-      <span className="text-ink-muted">
-        Incomplete — sign-in never finished
+      <span className="text-ink-muted" title={detail}>
+        Incomplete
       </span>
     )
   }

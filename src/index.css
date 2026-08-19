@@ -40,45 +40,51 @@ body {
 }
 
 /*
- * One column system for every provider group on Accounts. Label, Identity,
- * Auth, and Status keep the same track sizes whether Expires is present;
- * Actions takes the leftover. min-width is what the 900px window scrolls
- * inside the table container rather than crushing those tracks.
+ * Shared Accounts column system. Tracks are fluid: Label, Identity, and
+ * Status share leftover space from the same mins whether or not Expires
+ * is present. Auth and Actions shrink-wrap nowrap content so the two
+ * action buttons stay side by side. Expires stacks a nowrap date above
+ * a nowrap time so the column is only as wide as the date. The table
+ * fills its container; the wrapper — not the page — scrolls
+ * horizontally, and only when the window is near the 900px minimum.
  */
 .accounts-table {
-  table-layout: fixed;
   width: 100%;
-  min-width: 46rem;
   border-collapse: collapse;
 }
 
-.accounts-table.has-expires {
-  min-width: 54rem;
-}
-
-.accounts-table .col-label {
-  width: 12.5rem;
-}
-
+.accounts-table .col-label,
 .accounts-table .col-identity {
-  width: 11rem;
+  min-width: 5.5rem;
 }
 
 .accounts-table .col-auth {
-  width: 6.5rem;
+  width: 1%;
+  min-width: 4.5rem;
 }
 
 .accounts-table .col-status {
-  width: 9.5rem;
+  min-width: 6rem;
 }
 
 .accounts-table .col-expires {
-  width: 8.5rem;
+  width: 1%;
+  min-width: 6.5rem;
+}
+
+.accounts-table .col-actions {
+  width: 1%;
 }
 
 .accounts-table th,
 .accounts-table td {
   vertical-align: middle;
+  hyphens: none;
+  overflow-wrap: normal;
+}
+
+.accounts-table thead th {
+  white-space: nowrap;
 }
 
 .accounts-table tbody tr.is-active {
@@ -87,11 +93,22 @@ body {
 }
 
 .accounts-table tbody th {
-  hyphens: none;
   overflow: hidden;
-  overflow-wrap: normal;
   text-overflow: ellipsis;
+  white-space: nowrap;
   word-break: keep-all;
+}
+
+/*
+ * Date and time on separate nowrap lines so Expires is only as wide as
+ * the date, not the concatenated "Sep 21, 2026, 11:00 PM" string.
+ */
+.accounts-table .expiry {
+  display: flex;
+  flex-direction: column;
+}
+
+.accounts-table .expiry > span {
   white-space: nowrap;
 }
 
