@@ -36,6 +36,19 @@ pub enum Maturity {
     Supported,
 }
 
+/// A mutating account operation an adapter actually implements.
+///
+/// `maturity` is too coarse for the Accounts page: an experimental adapter
+/// may still add, switch, or delete. The UI offers a button only when this
+/// list contains the corresponding capability (NFR-8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderCapability {
+    AddAccount,
+    SwitchAccount,
+    DeleteAccount,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDescriptor {
@@ -45,6 +58,7 @@ pub struct ProviderDescriptor {
     pub auth_kinds: Vec<AuthKind>,
     pub maturity: Maturity,
     pub install_state: InstallState,
+    pub capabilities: Vec<ProviderCapability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +195,51 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Maturity::Supported).unwrap(),
             r#""supported""#
+        );
+    }
+
+    #[test]
+    fn provider_capability_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&ProviderCapability::AddAccount).unwrap(),
+            r#""add-account""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderCapability::SwitchAccount).unwrap(),
+            r#""switch-account""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderCapability::DeleteAccount).unwrap(),
+            r#""delete-account""#
+        );
+    }
+
+    #[test]
+    fn provider_descriptor_wire_shape_includes_capabilities() {
+        let descriptor = ProviderDescriptor {
+            id: "codex-cli".to_string(),
+            display_name: "Codex CLI".to_string(),
+            vendor: "OpenAI".to_string(),
+            auth_kinds: vec![AuthKind::OAuth],
+            maturity: Maturity::Experimental,
+            install_state: InstallState::Installed,
+            capabilities: vec![
+                ProviderCapability::AddAccount,
+                ProviderCapability::SwitchAccount,
+                ProviderCapability::DeleteAccount,
+            ],
+        };
+        assert_eq!(
+            serde_json::to_value(&descriptor).unwrap(),
+            serde_json::json!({
+                "id": "codex-cli",
+                "displayName": "Codex CLI",
+                "vendor": "OpenAI",
+                "authKinds": ["oauth"],
+                "maturity": "experimental",
+                "installState": "installed",
+                "capabilities": ["add-account", "switch-account", "delete-account"]
+            })
         );
     }
 

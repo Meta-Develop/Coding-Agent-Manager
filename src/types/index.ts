@@ -14,6 +14,9 @@ export type AuthKind = 'oauth' | 'api-key' | 'unknown'
 /** Whether the local tool for a provider was detected on this machine. */
 export type InstallState = 'installed' | 'not-installed' | 'unknown'
 
+/** A mutating account operation an adapter actually implements. */
+export type ProviderCapability = 'add-account' | 'switch-account' | 'delete-account'
+
 export interface ProviderDescriptor {
   id: ProviderId
   displayName: string
@@ -22,6 +25,11 @@ export interface ProviderDescriptor {
   /** Human-readable adapter maturity, surfaced in the Providers page. */
   maturity: 'planned' | 'experimental' | 'supported'
   installState: InstallState
+  /**
+   * Operations this adapter will honour. The Accounts page must not offer a
+   * button that is missing here (NFR-8). `maturity` does not answer that.
+   */
+  capabilities: ProviderCapability[]
 }
 
 export interface Account {
