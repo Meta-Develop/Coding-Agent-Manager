@@ -22,9 +22,10 @@ import type {
 
 /**
  * Lists accounts from every adapter, grouped by provider. Empty, unfinished,
- * failed, and API-key-only listings are distinct (`NFR-8`). Add, switch, and
- * delete appear only when the adapter advertises the matching capability
- * (`FR-1`, `NFR-8`).
+ * failed, and API-key-only listings are distinct (`NFR-8`). Add appears when
+ * the adapter advertises it. Switch and delete appear only when the adapter
+ * advertises the matching capability and the row is a stored copy this
+ * application can act on (`FR-1`, `NFR-8`).
  */
 export default function Accounts() {
   const [providers, setProviders] = useState<ProviderDescriptor[]>([])
@@ -264,6 +265,12 @@ function ProviderAccounts({
         onCancelPending,
         onConfirmPending,
       })}
+      {canAdd && listingHasUnstored(listing) && (
+        <p className="mt-3 text-sm text-ink-muted">
+          The tool&apos;s current identity is not stored here, so this
+          application cannot switch back to it.
+        </p>
+      )}
       {canAdd && (
         <AddAccountForm provider={provider} disabled={busy} onAdd={onAdd} />
       )}
@@ -395,7 +402,8 @@ function AccountTable({
 }) {
   const unknownActiveId = `${headingId}-unknown-active`
   const activeKnown = accounts.some((account) => account.isActive)
-  const showActions = canSwitch || canDelete
+  const showActions =
+    (canSwitch || canDelete) && accounts.some((account) => account.isStored)
 
   return (
     <>
@@ -461,8 +469,8 @@ function AccountTable({
                     <AccountActions
                       account={account}
                       provider={provider}
-                      canSwitch={canSwitch}
-                      canDelete={canDelete}
+                      canSwitch={canSwitch && account.isStored}
+                      canDelete={canDelete && account.isStored}
                       disabled={busy}
                       pending={
                         pending !== null && pending.accountId === account.id
@@ -489,6 +497,13 @@ function listingFor(
   providerId: string,
 ): ProviderAccountList | undefined {
   return listings.find((listing) => listing.providerId === providerId)
+}
+
+function listingHasUnstored(listing: ProviderAccountList | undefined): boolean {
+  return (
+    listing !== undefined &&
+    listing.accounts.some((account) => !account.isStored)
+  )
 }
 
 function presentOrAbsent(

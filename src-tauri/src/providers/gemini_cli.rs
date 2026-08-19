@@ -164,6 +164,9 @@ impl ProviderAdapter for GeminiCliAdapter {
             // the only account this adapter can see, and it is the value
             // the CLI reads. `is_active` is therefore `true`.
             is_active: true,
+            // GEMINI_API_KEY is the tool's environment, not a stored copy
+            // this application created.
+            is_stored: false,
             // An API key has no observable expiry here.
             expires_at: None,
         }])

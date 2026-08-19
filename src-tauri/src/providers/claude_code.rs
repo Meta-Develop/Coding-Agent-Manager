@@ -191,6 +191,9 @@ fn account_from_documents(
         masked_identity,
         auth_kind,
         is_active: true,
+        // The on-disk identity lives in the tool's own home. This adapter
+        // stores nothing, so mutating operations have nothing to act on.
+        is_stored: false,
         expires_at,
     }
 }
