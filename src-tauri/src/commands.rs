@@ -110,19 +110,36 @@ fn path_from_reason(reason: &str) -> Option<String> {
     }
 }
 
-/// Make an account active in its provider's tool.
+fn adapter_for(provider_id: &str) -> Result<Box<dyn providers::ProviderAdapter>> {
+    providers::find(provider_id).ok_or_else(|| Error::UnknownProvider(provider_id.to_string()))
+}
+
+/// Create a stored account on `provider_id` named `account_id`.
+///
+/// This command is blocking and interactive. The Codex adapter (the only
+/// implementation today) spawns the vendor CLI's own `codex login` with
+/// inherited stdio, so it does not return until the user finishes signing
+/// in, and the CLI's prompts appear on the terminal that launched this
+/// application. The UI has to say so; hiding that would strand a user who
+/// never looks at that terminal.
 #[tauri::command]
-pub fn activate_account(account_id: String) -> Result<()> {
-    for adapter in providers::registry() {
-        if adapter
-            .list_accounts()
-            .map(|accounts| accounts.iter().any(|account| account.id == account_id))
-            .unwrap_or(false)
-        {
-            return adapter.activate_account(&account_id);
-        }
-    }
-    Err(crate::error::Error::UnknownAccount(account_id))
+pub fn add_account(provider_id: String, account_id: String) -> Result<()> {
+    adapter_for(&provider_id)?.add_account(&account_id)
+}
+
+/// Make `account_id` the account `provider_id`'s tool will use on its next start.
+///
+/// Account ids are per-provider. The caller must name the adapter; scanning
+/// every adapter for an id is both wasteful and ambiguous.
+#[tauri::command]
+pub fn activate_account(provider_id: String, account_id: String) -> Result<()> {
+    adapter_for(&provider_id)?.activate_account(&account_id)
+}
+
+/// Forget a stored account. Does not sign the user out of the live tool.
+#[tauri::command]
+pub fn delete_account(provider_id: String, account_id: String) -> Result<()> {
+    adapter_for(&provider_id)?.delete_account(&account_id)
 }
 
 /// Quota snapshots from every adapter that publishes one.
@@ -291,5 +308,52 @@ mod tests {
     #[test]
     fn unknown_provider_id_yields_no_listings() {
         assert!(collect_account_listings(Some("not-a-provider")).is_empty());
+    }
+
+    #[test]
+    fn add_account_unknown_provider_is_unknown_provider() {
+        let error =
+            add_account("not-a-provider".into(), "acct-work".into()).expect_err("unknown provider");
+        assert!(matches!(
+            error,
+            Error::UnknownProvider(ref id) if id == "not-a-provider"
+        ));
+    }
+
+    #[test]
+    fn activate_account_unknown_provider_is_unknown_provider() {
+        let error = activate_account("not-a-provider".into(), "acct-work".into())
+            .expect_err("unknown provider");
+        assert!(matches!(
+            error,
+            Error::UnknownProvider(ref id) if id == "not-a-provider"
+        ));
+    }
+
+    #[test]
+    fn delete_account_unknown_provider_is_unknown_provider() {
+        let error = delete_account("not-a-provider".into(), "acct-work".into())
+            .expect_err("unknown provider");
+        assert!(matches!(
+            error,
+            Error::UnknownProvider(ref id) if id == "not-a-provider"
+        ));
+    }
+
+    #[test]
+    fn mutating_commands_on_an_unimplemented_adapter_are_not_implemented() {
+        // Cursor's methods are stubs: they return NotImplemented without
+        // touching the real home, keychain, or data directory.
+        let add = add_account("cursor".into(), "acct-work".into()).expect_err("cursor add");
+        let activate =
+            activate_account("cursor".into(), "acct-work".into()).expect_err("cursor activate");
+        let delete =
+            delete_account("cursor".into(), "acct-work".into()).expect_err("cursor delete");
+        assert!(matches!(add, Error::NotImplemented(_)), "got {add:?}");
+        assert!(
+            matches!(activate, Error::NotImplemented(_)),
+            "got {activate:?}"
+        );
+        assert!(matches!(delete, Error::NotImplemented(_)), "got {delete:?}");
     }
 }

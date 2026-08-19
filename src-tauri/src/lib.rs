@@ -32,7 +32,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_providers,
             commands::list_accounts,
+            commands::add_account,
             commands::activate_account,
+            commands::delete_account,
             commands::list_quota,
         ])
         .run(tauri::generate_context!())
