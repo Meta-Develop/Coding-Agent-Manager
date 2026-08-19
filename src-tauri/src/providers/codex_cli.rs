@@ -17,6 +17,7 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use super::{
     account_id_is_safe, binary_on_path, home_dir, managed_account_dir, process_named_is_running,
@@ -54,6 +55,11 @@ pub struct CodexCliAdapter {
     /// process table is ignored. `Some(Ok(b))` forces the answer.
     /// `Some(Err(()))` forces the cannot-tell path, which must refuse.
     injected_tool_running: Option<std::result::Result<bool, ()>>,
+    /// Override for `codex login`. `None` means spawn the real CLI, except
+    /// when `home` is injected — a fixture home is not a reason to open a
+    /// browser against a real account (`docs/TESTING.md` §4). Tests pass a
+    /// stub so a real login never runs.
+    login_runner: Option<fn(&Path) -> std::io::Result<i32>>,
     #[cfg(test)]
     fault: SwitchFault,
 }
@@ -99,6 +105,16 @@ impl CodexCliAdapter {
     /// refusal path can be exercised without spawning a real Codex.
     pub fn with_tool_running(mut self, running: bool) -> Self {
         self.injected_tool_running = Some(Ok(running));
+        self
+    }
+
+    /// Drive `codex login` with a stub instead of the real CLI.
+    ///
+    /// The stub receives the managed `CODEX_HOME` path and returns an exit
+    /// code (or a spawn-style I/O error). Tests use this so add-account
+    /// never opens a browser or touches a real account.
+    pub fn with_login_runner(mut self, runner: fn(&Path) -> std::io::Result<i32>) -> Self {
+        self.login_runner = Some(runner);
         self
     }
 
@@ -308,6 +324,244 @@ impl CodexCliAdapter {
             )),
         }
     }
+
+    /// Run `codex login` with `CODEX_HOME` at `managed_dir`.
+    ///
+    /// Stdio is inherited so the user sees the CLI's own prompts and URL.
+    /// The child's output is never captured, logged, or copied into an
+    /// error (NFR-1). Spawn failures report `ErrorKind` and the path only.
+    fn run_vendor_login(&self, managed_dir: &Path) -> Result<()> {
+        let code = match self.login_runner {
+            Some(runner) => runner(managed_dir).map_err(|error| {
+                self.config_write(format!(
+                    "could not start `codex login` with CODEX_HOME at {} ({})",
+                    managed_dir.display(),
+                    error.kind()
+                ))
+            })?,
+            None if self.home.is_some() => {
+                return Err(
+                    self.config_write("refusing to spawn `codex login` against an injected home")
+                );
+            }
+            None => self.spawn_codex_login(managed_dir)?,
+        };
+        if code != 0 {
+            return Err(self.config_write(format!(
+                "`codex login` exited with status {code}; CODEX_HOME is {}",
+                managed_dir.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn spawn_codex_login(&self, managed_dir: &Path) -> Result<i32> {
+        let status = Command::new("codex")
+            .arg("login")
+            .env("CODEX_HOME", managed_dir)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|error| {
+                self.config_write(format!(
+                    "could not start `codex login` with CODEX_HOME at {} ({})",
+                    managed_dir.display(),
+                    error.kind()
+                ))
+            })?;
+        match status.code() {
+            Some(code) => Ok(code),
+            None => Err(self.config_write(format!(
+                "`codex login` was terminated by a signal; CODEX_HOME is {}",
+                managed_dir.display()
+            ))),
+        }
+    }
+
+    /// Structure-only: `auth.json` exists, is a regular file, and is a JSON
+    /// object. Bytes are not inspected beyond that (NFR-1).
+    fn require_auth_json(&self, dir: &Path) -> Result<()> {
+        let path = dir.join("auth.json");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Err(self.config_write(format!(
+                    "`codex login` finished but {} was not created",
+                    path.display()
+                )));
+            }
+            Err(error) => {
+                return Err(self.config_write(format!("{} ({})", path.display(), error.kind())));
+            }
+        };
+        if !metadata.is_file() {
+            return Err(self.config_write(format!("{} is not a regular file", path.display())));
+        }
+        let bytes = fs::read(&path)
+            .map_err(|error| self.config_write(format!("{} ({})", path.display(), error.kind())))?;
+        // serde's error text can echo a token; never include it (NFR-1).
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| self.config_write(format!("{} is not valid JSON", path.display())))?;
+        if !value.is_object() {
+            return Err(self.config_write(format!("{} is not a JSON object", path.display())));
+        }
+        Ok(())
+    }
+
+    /// Live `auth.json` bytes plus the Account that file represents.
+    ///
+    /// A missing file is `(None, None)`. A malformed file is `Err`, which
+    /// fails the whole `list_accounts` call — including managed accounts
+    /// that would otherwise parse. `list_accounts` returns `Vec<Account>`
+    /// or an error, not both, so a damaged live slot cannot be reported
+    /// alongside readable stored copies. That is a known ceiling, not an
+    /// oversight: a richer result type would be required to split them.
+    fn live_slot(&self) -> Result<(Option<Vec<u8>>, Option<Account>)> {
+        let Some(path) = self.codex_home().map(|root| root.join("auth.json")) else {
+            return Ok((None, None));
+        };
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok((None, None)),
+            Err(error) => {
+                return Err(self.config_read(format!("{} ({})", path.display(), error.kind())));
+            }
+        };
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| self.config_read(format!("{} is not valid JSON", path.display())))?;
+        let Some(object) = value.as_object() else {
+            return Err(self.config_read(format!("{} is not a JSON object", path.display())));
+        };
+        Ok((
+            Some(bytes),
+            Some(account_from_auth(
+                self.id(),
+                ON_DISK_ACCOUNT_ID,
+                "Codex CLI",
+                object,
+                true,
+            )),
+        ))
+    }
+
+    /// Stored per-account directories that hold an `auth.json` JSON object.
+    ///
+    /// A missing, unreadable, or unparsable `auth.json` is skipped rather
+    /// than failing the whole list: one corrupt stored copy must not hide
+    /// the others. Directory-listing I/O on the managed root still errors.
+    fn managed_slots(&self, live_bytes: Option<&[u8]>) -> Result<Vec<Account>> {
+        let Some(data_dir) = self.resolved_data_dir() else {
+            return Ok(Vec::new());
+        };
+        let root = data_dir.join("accounts").join(self.id());
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(self.config_read(format!("{} ({})", root.display(), error.kind())));
+            }
+        };
+
+        let mut documents = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                self.config_read(format!("{} ({})", root.display(), error.kind()))
+            })?;
+            let name = entry.file_name();
+            let Some(account_id) = name.to_str() else {
+                continue;
+            };
+            if !account_id_is_safe(account_id) {
+                continue;
+            }
+            // `DirEntry::file_type` does not follow symlinks. A file or
+            // a planted symlink in this tree is not a stored account;
+            // following the link would let it impersonate another slot
+            // or the live home.
+            let file_type = entry.file_type().map_err(|error| {
+                self.config_read(format!("{} ({})", root.display(), error.kind()))
+            })?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let path = managed_account_dir(&data_dir, self.id(), account_id).join("auth.json");
+            let Ok(bytes) = fs::read(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            let Some(object) = value.as_object() else {
+                continue;
+            };
+            documents.push((account_id.to_string(), bytes, object.clone()));
+        }
+        documents.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut claimed_active = false;
+        let mut accounts = Vec::with_capacity(documents.len());
+        for (account_id, bytes, object) in documents {
+            let is_active = live_bytes == Some(bytes.as_slice()) && !claimed_active;
+            if is_active {
+                claimed_active = true;
+            }
+            accounts.push(account_from_auth(
+                self.id(),
+                &account_id,
+                &account_id,
+                &object,
+                is_active,
+            ));
+        }
+        Ok(accounts)
+    }
+
+    /// Create a new owner-only directory at `dir`.
+    ///
+    /// Any existing directory entry — file, directory, or symlink,
+    /// including a dangling one — is refused. `Path::exists` follows
+    /// links, so a dangling symlink would look absent, and
+    /// `create_dir_all` is idempotent, so an existing directory would
+    /// be reused. Either would let a later failure `remove_dir_all` a
+    /// path this call did not create, or walk through a planted link.
+    /// Parents are created as needed; only the leaf is exclusive, so
+    /// cleanup cannot remove the provider's accounts tree.
+    fn create_fresh_managed_dir(&self, dir: &Path) -> Result<()> {
+        match fs::symlink_metadata(dir) {
+            Ok(_) => {
+                return Err(self.config_write(format!(
+                    "{} already exists; refusing to overwrite a managed account directory",
+                    dir.display()
+                )));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(self.config_write(format!("{} ({})", dir.display(), error.kind())));
+            }
+        }
+        if let Some(parent) = dir.parent() {
+            fsx::create_dir_all_private(parent).map_err(|error| {
+                self.config_write(format!("could not create {}: {error}", parent.display()))
+            })?;
+        }
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(dir).map_err(|error| {
+            if error.kind() == ErrorKind::AlreadyExists {
+                self.config_write(format!(
+                    "{} already exists; refusing to overwrite a managed account directory",
+                    dir.display()
+                ))
+            } else {
+                self.config_write(format!("could not create {}: {error}", dir.display()))
+            }
+        })
+    }
 }
 
 /// Mask a vendor identifier for display.
@@ -328,10 +582,7 @@ fn mask_identity(raw: &str) -> Option<String> {
     Some(format!("****{tail}"))
 }
 
-/// Build the single `Account` that a parsed `auth.json` object represents.
-///
-/// The document holds exactly one identity [verified-local], so whatever is in
-/// it is what the tool will use — `is_active` is therefore always `true`.
+/// Build an `Account` from a parsed `auth.json` object.
 ///
 /// Classification inspects structure only (NFR-1 / threat T2):
 /// - `ApiKey` when `OPENAI_API_KEY` is a non-null string [verified-local]
@@ -339,10 +590,14 @@ fn mask_identity(raw: &str) -> Option<String> {
 /// - otherwise `AuthKind::Unknown`
 ///
 /// Token, key, and raw `account_id` values are never copied onto the `Account`.
-/// `id_token` is a JWT and is not decoded.
+/// `id_token` is a JWT and is not decoded. `is_active` is supplied by the
+/// caller; this helper does not guess it.
 fn account_from_auth(
     provider_id: &str,
+    account_id: &str,
+    label: &str,
     object: &serde_json::Map<String, serde_json::Value>,
+    is_active: bool,
 ) -> Account {
     let has_api_key = matches!(
         object.get("OPENAI_API_KEY"),
@@ -362,12 +617,12 @@ fn account_from_auth(
         .and_then(mask_identity);
 
     Account {
-        id: ON_DISK_ACCOUNT_ID.to_string(),
+        id: account_id.to_string(),
         provider_id: provider_id.to_string(),
-        label: "Codex CLI".to_string(),
+        label: label.to_string(),
         masked_identity,
         auth_kind,
-        is_active: true,
+        is_active,
         // `last_refresh` is a refresh timestamp, not an expiry [verified-local].
         // Inventing `expires_at` from it would fabricate a capability the file
         // does not provide (NFR-8).
@@ -412,25 +667,37 @@ impl ProviderAdapter for CodexCliAdapter {
     }
 
     fn list_accounts(&self) -> Result<Vec<Account>> {
-        let Some(path) = self.codex_home().map(|root| root.join("auth.json")) else {
-            return Ok(Vec::new());
-        };
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            // A missing file means no account is configured [verified-local].
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => {
-                return Err(self.config_read(format!("{} ({})", path.display(), error.kind())));
+        // is_active (NFR-8): the live Codex home holds exactly one identity,
+        // and that is what the tool will use [verified-local]. A managed
+        // directory is a stored copy. We mark a managed account active only
+        // when its `auth.json` is byte-identical to the live file — a
+        // structure-level comparison, not a token parse, and the one thing
+        // we can tell without decoding identity. If a managed document
+        // matches, the on-disk live slot is omitted: listing it as a
+        // second active account would be a lie, and listing it as inactive
+        // would deny that its file is the one in use. If no managed
+        // document matches, the live slot is reported active. If there is
+        // no live `auth.json`, no account is active — we do not guess that
+        // a stored copy is in use. Two stored copies of the same bytes
+        // would both match; only the first in sorted id order is marked
+        // active so we never claim two accounts are both active.
+        //
+        // A malformed live `auth.json` still fails this whole call
+        // (`live_slot`), even when every managed copy is readable.
+        // Returning a partial `Vec` would hide the damage; a richer
+        // result type is out of scope here.
+        let (live_bytes, live_account) = self.live_slot()?;
+        let mut managed = self.managed_slots(live_bytes.as_deref())?;
+        let managed_has_active = managed.iter().any(|account| account.is_active);
+
+        let mut accounts = Vec::new();
+        if let Some(account) = live_account {
+            if !managed_has_active {
+                accounts.push(account);
             }
-        };
-        // Reason strings name the path and the kind of failure only. The serde
-        // error text can echo a token from the file; never include it (NFR-1).
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|_| self.config_read(format!("{} is not valid JSON", path.display())))?;
-        let Some(object) = value.as_object() else {
-            return Err(self.config_read(format!("{} is not a JSON object", path.display())));
-        };
-        Ok(vec![account_from_auth(self.id(), object)])
+        }
+        accounts.append(&mut managed);
+        Ok(accounts)
     }
 
     fn activate_account(&self, account_id: &str) -> Result<()> {
@@ -517,6 +784,50 @@ impl ProviderAdapter for CodexCliAdapter {
         }
 
         Ok(())
+    }
+
+    fn add_account(&self, account_id: &str) -> Result<()> {
+        // SPEC.md §7 describes an in-app authorization-code + PKCE flow.
+        // This adapter instead runs the vendor CLI's own `codex login` with
+        // `CODEX_HOME` pointed at a per-account directory. The CLI performs
+        // the browser sign-in and writes `auth.json` in whatever shape it
+        // currently uses. This application never learns the format, never
+        // invents a field, and stays correct if the vendor changes the
+        // file. That is the same outcome as §7 without handling the
+        // vendor's tokens, which is strictly better for NFR-1. This
+        // creates a stored account; it does not switch the live home to
+        // it, and it never touches `~/.codex`.
+        //
+        // Managed directories live under the application data directory,
+        // not `/tmp`. With `CODEX_HOME` under the system temporary tree,
+        // Codex 0.144.4 refuses to create PATH helper binaries
+        // (`docs/research/codex-cli.md` §8). Tests inject the subprocess
+        // and never spawn `codex`, so that constraint is not exercised
+        // here.
+
+        if !account_id_is_safe(account_id) {
+            return Err(self.config_write(
+                "account id is not a safe path component; refusing to create a managed directory",
+            ));
+        }
+        let Some(data_dir) = self.resolved_data_dir() else {
+            return Err(self.config_write(
+                "application data directory is unavailable; cannot create a managed account",
+            ));
+        };
+        let dir = managed_account_dir(&data_dir, self.id(), account_id);
+        self.create_fresh_managed_dir(&dir)?;
+
+        // `dir` was created by this call. Failure after this point removes
+        // only that directory, never a parent that may already hold other
+        // accounts and never the provider's accounts tree.
+        let outcome = self
+            .run_vendor_login(&dir)
+            .and_then(|()| self.require_auth_json(&dir));
+        if outcome.is_err() {
+            let _ = fs::remove_dir_all(&dir);
+        }
+        outcome
     }
 }
 
@@ -1044,5 +1355,587 @@ mod tests {
             !env.data.path().join("backups").exists(),
             "cannot-tell must not snapshot"
         );
+    }
+
+    const ADDED_ACCOUNT: &str = "acct-new";
+    const SIBLING_ACCOUNT: &str = "acct-keep";
+    const LOGIN_SPAWN_OUTPUT: &str = "FAKE-subprocess-output-must-never-appear";
+
+    fn managed_oauth_path() -> std::path::PathBuf {
+        Path::new(FIXTURE_ROOT).join("managed-oauth/auth.json")
+    }
+
+    fn managed_oauth_bytes() -> Vec<u8> {
+        fs::read(managed_oauth_path()).expect("managed-oauth fixture")
+    }
+
+    fn login_writes_managed_oauth(dir: &Path) -> std::io::Result<i32> {
+        fs::copy(managed_oauth_path(), dir.join("auth.json")).expect("copy managed-oauth fixture");
+        Ok(0)
+    }
+
+    fn login_exits_nonzero(dir: &Path) -> std::io::Result<i32> {
+        fs::write(dir.join("partial"), b"incomplete")?;
+        Ok(1)
+    }
+
+    fn login_ok_without_auth(dir: &Path) -> std::io::Result<i32> {
+        fs::write(dir.join("unrelated.txt"), b"no auth.json")?;
+        Ok(0)
+    }
+
+    fn login_fails_to_start(_dir: &Path) -> std::io::Result<i32> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            LOGIN_SPAWN_OUTPUT,
+        ))
+    }
+
+    fn login_must_not_run(_dir: &Path) -> std::io::Result<i32> {
+        panic!("codex login must not run");
+    }
+
+    struct AddEnv {
+        live: tempfile::TempDir,
+        data: tempfile::TempDir,
+    }
+
+    impl AddEnv {
+        fn new() -> Self {
+            Self {
+                live: staged_home("home"),
+                data: tempfile::tempdir().expect("data dir"),
+            }
+        }
+
+        fn empty_live() -> Self {
+            let live = tempfile::tempdir().expect("empty live");
+            fs::create_dir_all(live.path().join(".codex")).expect("empty .codex");
+            Self {
+                live,
+                data: tempfile::tempdir().expect("data dir"),
+            }
+        }
+
+        fn adapter(&self, runner: fn(&Path) -> std::io::Result<i32>) -> CodexCliAdapter {
+            CodexCliAdapter::with_home(self.live.path())
+                .with_data_dir(self.data.path())
+                .with_login_runner(runner)
+        }
+
+        fn managed_dir(&self, account_id: &str) -> std::path::PathBuf {
+            self.data.path().join("accounts/codex-cli").join(account_id)
+        }
+
+        fn digest(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+            digest_codex(self.live.path())
+        }
+
+        fn seed_managed(&self, account_id: &str, auth: &[u8]) {
+            let dir = self.managed_dir(account_id);
+            fs::create_dir_all(&dir).expect("managed dir");
+            fs::write(dir.join("auth.json"), auth).expect("managed auth");
+        }
+    }
+
+    fn assert_add_error_is_clean(error: &Error) {
+        assert_no_fake("add_account Display", &error.to_string());
+        assert_no_fake("add_account Debug", &format!("{error:?}"));
+        assert!(
+            !error.to_string().contains(LOGIN_SPAWN_OUTPUT),
+            "add_account Display leaked subprocess output: {error}"
+        );
+        assert!(
+            !format!("{error:?}").contains(LOGIN_SPAWN_OUTPUT),
+            "add_account Debug leaked subprocess output: {error:?}"
+        );
+    }
+
+    fn assert_no_managed_leaf(env: &AddEnv, account_id: &str) {
+        let dir = env.managed_dir(account_id);
+        assert!(
+            fs::symlink_metadata(&dir).is_err(),
+            "managed path must not remain after a failed add: {}",
+            dir.display()
+        );
+    }
+
+    #[test]
+    fn add_account_creates_a_managed_directory_and_lists_it() {
+        let env = AddEnv::new();
+        let before = env.digest();
+
+        env.adapter(login_writes_managed_oauth)
+            .add_account(ADDED_ACCOUNT)
+            .expect("add");
+
+        let dir = env.managed_dir(ADDED_ACCOUNT);
+        assert!(
+            dir.is_dir(),
+            "managed directory must exist after a successful add"
+        );
+        assert_eq!(
+            fs::read(dir.join("auth.json")).expect("read added auth.json"),
+            managed_oauth_bytes(),
+            "managed auth.json must be the document the login stub wrote"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&dir)
+                .expect("managed dir metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "managed directory must be owner-only");
+        }
+
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list after add");
+        let added = accounts
+            .iter()
+            .find(|account| account.id == ADDED_ACCOUNT)
+            .expect("added account must appear in list_accounts");
+        assert_eq!(added.provider_id, "codex-cli");
+        assert_eq!(added.auth_kind, AuthKind::OAuth);
+        assert_eq!(added.masked_identity.as_deref(), Some("****0003"));
+        assert!(
+            !added.is_active,
+            "a new stored copy is not the live identity"
+        );
+        assert!(
+            accounts
+                .iter()
+                .any(|account| { account.id == ON_DISK_ACCOUNT_ID && account.is_active }),
+            "live row must remain active when the new copy does not match it"
+        );
+
+        assert_eq!(
+            before,
+            env.digest(),
+            "add_account must not touch the live Codex home; before={} after={}",
+            digest_brief(&before),
+            digest_brief(&env.digest())
+        );
+        assert_no_fake(
+            "list_accounts after add",
+            &serde_json::to_string(&accounts).expect("json"),
+        );
+    }
+
+    #[test]
+    fn add_account_removes_the_directory_when_login_exits_nonzero() {
+        let env = AddEnv::new();
+        env.seed_managed(SIBLING_ACCOUNT, &managed_oauth_bytes());
+        let before = env.digest();
+        let sibling =
+            fs::read(env.managed_dir(SIBLING_ACCOUNT).join("auth.json")).expect("sibling");
+
+        let error = env
+            .adapter(login_exits_nonzero)
+            .add_account(ADDED_ACCOUNT)
+            .expect_err("nonzero login");
+        assert!(
+            matches!(error, Error::ConfigWrite { .. }),
+            "expected ConfigWrite, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("exited with status 1"),
+            "user must be told the exit status: {error}"
+        );
+        assert_add_error_is_clean(&error);
+        assert_no_managed_leaf(&env, ADDED_ACCOUNT);
+        assert_eq!(
+            fs::read(env.managed_dir(SIBLING_ACCOUNT).join("auth.json")).expect("sibling after"),
+            sibling,
+            "a failed add must not remove a sibling managed account"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn add_account_removes_the_directory_when_login_writes_no_auth_json() {
+        let env = AddEnv::new();
+        let before = env.digest();
+
+        let error = env
+            .adapter(login_ok_without_auth)
+            .add_account(ADDED_ACCOUNT)
+            .expect_err("missing auth.json");
+        assert!(
+            matches!(error, Error::ConfigWrite { .. }),
+            "expected ConfigWrite, got {error:?}"
+        );
+        let display = error.to_string();
+        assert!(
+            display.contains("was not created"),
+            "user must be told auth.json is missing: {error}"
+        );
+        assert!(
+            display.contains("auth.json"),
+            "user must be told which file is missing: {error}"
+        );
+        assert_add_error_is_clean(&error);
+        assert_no_managed_leaf(&env, ADDED_ACCOUNT);
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn add_account_reports_a_spawn_failure_by_kind_and_path() {
+        let env = AddEnv::new();
+        let before = env.digest();
+        let expected_dir = env.managed_dir(ADDED_ACCOUNT);
+        let kind = std::io::ErrorKind::NotFound;
+
+        let error = env
+            .adapter(login_fails_to_start)
+            .add_account(ADDED_ACCOUNT)
+            .expect_err("spawn failure");
+        assert!(
+            matches!(error, Error::ConfigWrite { .. }),
+            "expected ConfigWrite, got {error:?}"
+        );
+        let display = error.to_string();
+        assert!(
+            display.contains("could not start"),
+            "user must be told the CLI did not start: {error}"
+        );
+        assert!(
+            display.contains(&expected_dir.display().to_string()),
+            "user must be told the CODEX_HOME path: {error}"
+        );
+        assert!(
+            display.contains(&format!("{kind}")),
+            "user must be told the I/O kind ({kind}): {error}"
+        );
+        assert_add_error_is_clean(&error);
+        assert_no_managed_leaf(&env, ADDED_ACCOUNT);
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn add_account_refuses_an_existing_managed_directory_without_changing_it() {
+        let env = AddEnv::new();
+        env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
+        let dir = env.managed_dir(ADDED_ACCOUNT);
+        fs::write(dir.join("sentinel.txt"), b"leave me").expect("sentinel");
+        let before_auth = fs::read(dir.join("auth.json")).expect("auth before");
+        let before_live = env.digest();
+
+        let error = env
+            .adapter(login_must_not_run)
+            .add_account(ADDED_ACCOUNT)
+            .expect_err("existing directory");
+        assert!(
+            matches!(error, Error::ConfigWrite { .. }),
+            "expected ConfigWrite, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("already exists"),
+            "user must be told the directory already exists: {error}"
+        );
+        assert_add_error_is_clean(&error);
+        assert_eq!(
+            fs::read(dir.join("auth.json")).expect("auth after"),
+            before_auth,
+            "existing managed auth.json must be unchanged"
+        );
+        assert_eq!(
+            fs::read(dir.join("sentinel.txt")).expect("sentinel after"),
+            b"leave me",
+            "existing managed directory contents must be unchanged"
+        );
+        assert_eq!(before_live, env.digest());
+    }
+
+    #[test]
+    fn add_account_refuses_an_unsafe_id_before_creating_anything() {
+        let env = AddEnv::new();
+        env.seed_managed(SIBLING_ACCOUNT, &managed_oauth_bytes());
+        let before = env.digest();
+        let sibling =
+            fs::read(env.managed_dir(SIBLING_ACCOUNT).join("auth.json")).expect("sibling");
+
+        for unsafe_id in ["../etc", "acct/work", ""] {
+            let error = env
+                .adapter(login_must_not_run)
+                .add_account(unsafe_id)
+                .expect_err("unsafe id");
+            assert!(
+                matches!(error, Error::ConfigWrite { .. }),
+                "expected ConfigWrite for {unsafe_id:?}, got {error:?}"
+            );
+            assert!(
+                error.to_string().contains("not a safe path component"),
+                "user must be told the id is unsafe ({unsafe_id:?}): {error}"
+            );
+            assert_add_error_is_clean(&error);
+        }
+
+        assert_eq!(
+            fs::read(env.managed_dir(SIBLING_ACCOUNT).join("auth.json")).expect("sibling after"),
+            sibling,
+            "an unsafe id must not touch a sibling managed account"
+        );
+        assert!(
+            !env.data.path().join("accounts/etc").exists(),
+            "../etc must not escape into a sibling of the provider tree"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_account_refuses_a_dangling_symlink_at_the_managed_path() {
+        let env = AddEnv::new();
+        let dir = env.managed_dir(ADDED_ACCOUNT);
+        fs::create_dir_all(dir.parent().expect("parent")).expect("provider tree");
+        std::os::unix::fs::symlink(dir.with_file_name("missing-target"), &dir)
+            .expect("dangling symlink");
+        let before = env.digest();
+
+        let error = env
+            .adapter(login_must_not_run)
+            .add_account(ADDED_ACCOUNT)
+            .expect_err("dangling symlink");
+        assert!(
+            error.to_string().contains("already exists"),
+            "a dangling symlink is an existing directory entry: {error}"
+        );
+        assert_add_error_is_clean(&error);
+        let metadata = fs::symlink_metadata(&dir).expect("symlink remains");
+        assert!(
+            metadata.file_type().is_symlink(),
+            "refusing the slot must not replace a symlink we did not create"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn add_account_refuses_a_file_at_the_managed_path() {
+        let env = AddEnv::new();
+        let dir = env.managed_dir(ADDED_ACCOUNT);
+        fs::create_dir_all(dir.parent().expect("parent")).expect("provider tree");
+        fs::write(&dir, b"not a directory").expect("file at slot");
+        let before = env.digest();
+
+        let error = env
+            .adapter(login_must_not_run)
+            .add_account(ADDED_ACCOUNT)
+            .expect_err("file at slot");
+        assert!(
+            error.to_string().contains("already exists"),
+            "a file at the slot is an existing directory entry: {error}"
+        );
+        assert_add_error_is_clean(&error);
+        assert_eq!(
+            fs::read(&dir).expect("file after"),
+            b"not a directory",
+            "refusing the slot must not replace a file we did not create"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn list_accounts_marks_a_byte_identical_managed_copy_active_and_omits_the_live_row() {
+        let env = AddEnv::new();
+        let live_auth = fs::read(env.live.path().join(".codex/auth.json")).expect("live auth");
+        env.seed_managed(TARGET_ACCOUNT, &live_auth);
+        let before = env.digest();
+
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list");
+        assert_eq!(
+            accounts.iter().filter(|account| account.is_active).count(),
+            1,
+            "exactly one account must be active"
+        );
+        let managed = accounts
+            .iter()
+            .find(|account| account.id == TARGET_ACCOUNT)
+            .expect("managed account");
+        assert!(managed.is_active);
+        assert!(
+            accounts
+                .iter()
+                .all(|account| account.id != ON_DISK_ACCOUNT_ID),
+            "the anonymous live row must be omitted when a managed copy matches"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn list_accounts_reports_the_live_row_when_no_managed_copy_matches() {
+        let env = AddEnv::new();
+        env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
+        let before = env.digest();
+
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list");
+        let live = accounts
+            .iter()
+            .find(|account| account.id == ON_DISK_ACCOUNT_ID)
+            .expect("live row");
+        assert!(live.is_active);
+        let managed = accounts
+            .iter()
+            .find(|account| account.id == ADDED_ACCOUNT)
+            .expect("managed account");
+        assert!(!managed.is_active);
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn list_accounts_claims_nothing_active_when_there_is_no_live_auth_json() {
+        let env = AddEnv::empty_live();
+        env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
+        let before = env.digest();
+
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list");
+        assert!(
+            accounts.iter().all(|account| !account.is_active),
+            "a stored copy is not in use when the live file is missing"
+        );
+        assert!(
+            accounts.iter().any(|account| account.id == ADDED_ACCOUNT),
+            "the stored account must still be listed"
+        );
+        assert!(
+            accounts
+                .iter()
+                .all(|account| account.id != ON_DISK_ACCOUNT_ID),
+            "no live row without a live auth.json"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn list_accounts_skips_a_malformed_or_missing_managed_auth_json_without_hiding_others() {
+        let env = AddEnv::new();
+        env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
+        env.seed_managed("acct-bad", b"{this is not json");
+        fs::create_dir_all(env.managed_dir("acct-empty")).expect("empty managed dir");
+        let before = env.digest();
+
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list");
+        let ids: Vec<&str> = accounts.iter().map(|account| account.id.as_str()).collect();
+        assert!(
+            ids.contains(&ADDED_ACCOUNT),
+            "a readable managed account must still be listed: {ids:?}"
+        );
+        assert!(
+            ids.contains(&ON_DISK_ACCOUNT_ID),
+            "the live row must still be listed: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"acct-bad"),
+            "a malformed managed auth.json must be skipped: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"acct-empty"),
+            "a managed directory with no auth.json must be skipped: {ids:?}"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn list_accounts_skips_a_file_or_symlink_in_the_managed_root() {
+        let env = AddEnv::new();
+        env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
+        let root = env.data.path().join("accounts/codex-cli");
+        fs::write(root.join("acct-file"), b"not a directory").expect("file in root");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(env.managed_dir(ADDED_ACCOUNT), root.join("acct-link"))
+                .expect("symlink in root");
+        }
+        let before = env.digest();
+
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list");
+        let ids: Vec<&str> = accounts.iter().map(|account| account.id.as_str()).collect();
+        assert!(
+            ids.contains(&ADDED_ACCOUNT),
+            "real managed account missing: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"acct-file"),
+            "a file must not be listed: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"acct-link"),
+            "a symlink must not be listed as a stored account: {ids:?}"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn list_accounts_fails_when_live_auth_json_is_malformed_even_if_managed_accounts_parse() {
+        let env = AddEnv::new();
+        env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
+        fs::write(
+            env.live.path().join(".codex/auth.json"),
+            r#"{this is not json, "OPENAI_API_KEY": "FAKE-malformed-key-0001""#,
+        )
+        .expect("malformed live auth.json");
+
+        let error = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect_err("malformed live auth.json must fail the whole list");
+        assert!(
+            matches!(error, Error::ConfigRead { .. }),
+            "expected ConfigRead, got {error:?}"
+        );
+        assert_no_fake("ConfigRead Display", &error.to_string());
+        assert_no_fake("ConfigRead Debug", &format!("{error:?}"));
+    }
+
+    #[test]
+    fn list_accounts_marks_only_the_first_matching_managed_copy_active() {
+        let env = AddEnv::new();
+        let live_auth = fs::read(env.live.path().join(".codex/auth.json")).expect("live auth");
+        env.seed_managed("acct-a", &live_auth);
+        env.seed_managed("acct-b", &live_auth);
+        let before = env.digest();
+
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list");
+        let a = accounts
+            .iter()
+            .find(|account| account.id == "acct-a")
+            .expect("acct-a");
+        let b = accounts
+            .iter()
+            .find(|account| account.id == "acct-b")
+            .expect("acct-b");
+        assert!(a.is_active, "first in sorted id order claims the live slot");
+        assert!(
+            !b.is_active,
+            "a second copy of the same bytes is not also active"
+        );
+        assert!(
+            accounts
+                .iter()
+                .all(|account| account.id != ON_DISK_ACCOUNT_ID),
+            "the live row is omitted once a managed copy matches"
+        );
+        assert_eq!(before, env.digest());
     }
 }
