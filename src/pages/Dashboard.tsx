@@ -47,6 +47,9 @@ export default function Dashboard() {
     (listing) => listing.outcome.kind === 'not-implemented',
   )
   const failed = listings.filter((listing) => listing.outcome.kind === 'failed')
+  const listedWithError = listings.filter(
+    (listing) => listing.outcome.kind === 'listed-with-error',
+  )
   const apiKeyOnly = listings.filter(
     (listing) => listing.outcome.kind === 'listed-api-key-only',
   )
@@ -115,6 +118,14 @@ export default function Dashboard() {
                 </th>
                 <td className="py-2 text-ink-muted">
                   {displayNames(failed, providers)}
+                </td>
+              </tr>
+              <tr className="border-t border-border-subtle">
+                <th scope="row" className="py-2 pr-4 text-left font-medium">
+                  Listings whose live login file is damaged
+                </th>
+                <td className="py-2 text-ink-muted">
+                  {displayNames(listedWithError, providers)}
                 </td>
               </tr>
               <tr className="border-t border-border-subtle">

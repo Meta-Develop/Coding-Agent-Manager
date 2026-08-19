@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 import AccountActions, {
   accountDisplayName,
   type PendingKind,
@@ -7,12 +7,10 @@ import AddAccountForm from '@/components/AddAccountForm'
 import NotImplemented from '@/components/NotImplemented'
 import PageHeader from '@/components/PageHeader'
 import {
-  activateAccount,
-  addAccount,
-  deleteAccount,
-  listAccounts,
-  listProviders,
-} from '@/lib/tauri'
+  useAccountMutation,
+  type PendingConfirmation,
+} from '@/lib/accountMutation'
+import { listAccounts, listProviders } from '@/lib/tauri'
 import type {
   Account,
   ProviderAccountList,
@@ -22,33 +20,43 @@ import type {
 
 /**
  * Lists accounts from every adapter, grouped by provider. Empty, unfinished,
- * failed, and API-key-only listings are distinct (`NFR-8`). Add appears when
- * the adapter advertises it. Switch and delete appear only when the adapter
- * advertises the matching capability and the row is a stored copy this
- * application can act on (`FR-1`, `NFR-8`).
+ * failed, listed-with-error, and API-key-only listings are distinct (`NFR-8`).
+ * Add appears when the adapter advertises it. Switch appears only when the
+ * adapter advertises it, the row is a stored copy, and that copy is
+ * complete. Delete appears when the adapter advertises it and the row is
+ * stored, including incomplete slots (`FR-1`, `NFR-8`).
  */
 export default function Accounts() {
   const [providers, setProviders] = useState<ProviderDescriptor[]>([])
   const [listings, setListings] = useState<ProviderAccountList[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState(false)
-  const [notice, setNotice] = useState<Notice | null>(null)
-  const [pending, setPending] = useState<PendingConfirmation | null>(null)
-  const cancelledRef = useRef(false)
+  const {
+    busy,
+    pending,
+    listingEpoch,
+    requestPending,
+    cancelPending,
+    runMutation,
+  } = useAccountMutation()
 
   useEffect(() => {
-    cancelledRef.current = false
     let cancelled = false
     Promise.all([listProviders(), listAccounts()])
       .then(([nextProviders, nextListings]) => {
         if (cancelled) return
         setProviders(nextProviders)
         setListings(nextListings)
+        setError(null)
       })
       .catch((cause: unknown) => {
         if (cancelled) return
-        setError(String(cause))
+        // A reload after a successful mutation must not blank a listing
+        // the user can still act on. The page-level error is only for
+        // the first look.
+        if (listingEpoch === 0) {
+          setError(String(cause))
+        }
       })
       .finally(() => {
         if (cancelled) return
@@ -56,79 +64,18 @@ export default function Accounts() {
       })
     return () => {
       cancelled = true
-      cancelledRef.current = true
     }
-  }, [])
+  }, [listingEpoch])
 
   const cannotSwitch = providers.filter(
     (provider) => !hasCapability(provider, 'switch-account'),
   )
 
-  async function runMutation(
-    kind: PendingKind | 'add',
-    provider: ProviderDescriptor,
-    accountId: string,
-    accountName: string,
-  ): Promise<boolean> {
-    setPending(null)
-    setBusy(true)
-    setNotice({
-      tone: 'progress',
-      message: progressMessage(kind, provider, accountId, accountName),
-    })
-
-    try {
-      if (kind === 'add') {
-        await addAccount(provider.id, accountId)
-      } else if (kind === 'switch') {
-        await activateAccount(provider.id, accountId)
-      } else {
-        await deleteAccount(provider.id, accountId)
-      }
-    } catch (cause: unknown) {
-      if (cancelledRef.current) return false
-      setNotice({
-        tone: 'failure',
-        message: `${failureLead(kind, provider, accountId, accountName)} ${commandErrorMessage(cause)}`,
-      })
-      setBusy(false)
-      return false
-    }
-
-    if (cancelledRef.current) return true
-
-    try {
-      const [nextProviders, nextListings] = await Promise.all([
-        listProviders(),
-        listAccounts(),
-      ])
-      if (cancelledRef.current) return true
-      setProviders(nextProviders)
-      setListings(nextListings)
-      setNotice({
-        tone: 'success',
-        message: successMessage(kind, provider, accountId, accountName),
-      })
-    } catch (cause: unknown) {
-      if (cancelledRef.current) return true
-      setNotice({
-        tone: 'failure',
-        message: `${successMessage(kind, provider, accountId, accountName)} Reloading the list failed: ${commandErrorMessage(cause)}`,
-      })
-    } finally {
-      if (!cancelledRef.current) {
-        setBusy(false)
-      }
-    }
-
-    return true
-  }
-
   function handleConfirmPending() {
     if (pending === null) return
     const provider = providers.find((item) => item.id === pending.providerId)
     if (provider === undefined) {
-      setPending(null)
+      cancelPending()
       return
     }
     const listing = listingFor(listings, pending.providerId)
@@ -156,15 +103,6 @@ export default function Accounts() {
           Failed to load accounts: {error}
         </p>
       )}
-      {notice !== null && (
-        <p
-          key={notice.message}
-          role={notice.tone === 'failure' ? 'alert' : 'status'}
-          className={noticeClass(notice.tone)}
-        >
-          {notice.message}
-        </p>
-      )}
       {!loading && error === null && (
         <div className="space-y-8" aria-busy={busy}>
           {providers.length === 0 && (
@@ -187,13 +125,13 @@ export default function Accounts() {
                 runMutation('add', provider, accountId, accountId)
               }
               onRequest={(accountId, kind) =>
-                setPending({
+                requestPending({
                   providerId: provider.id,
                   accountId,
                   kind,
                 })
               }
-              onCancelPending={() => setPending(null)}
+              onCancelPending={cancelPending}
               onConfirmPending={handleConfirmPending}
             />
           ))}
@@ -208,17 +146,6 @@ export default function Accounts() {
       )}
     </>
   )
-}
-
-interface PendingConfirmation {
-  providerId: string
-  accountId: string
-  kind: PendingKind
-}
-
-interface Notice {
-  tone: 'progress' | 'success' | 'failure'
-  message: string
 }
 
 function ProviderAccounts({
@@ -352,6 +279,22 @@ function listingBody({
           </LimitationNote>
         </>
       )
+    case 'listed-with-error':
+      return (
+        <>
+          <DamagedLiveFileNote
+            provider={provider}
+            message={listing.outcome.error.message}
+          />
+          {listing.accounts.length > 0 ? (
+            table(listing.accounts)
+          ) : (
+            <p className="mt-3 text-sm text-ink-muted">
+              No stored copy is available to switch over the damaged file.
+            </p>
+          )}
+        </>
+      )
     case 'not-implemented':
       return (
         <LimitationNote>This adapter cannot list accounts yet.</LimitationNote>
@@ -367,6 +310,31 @@ function listingBody({
       return _exhaustive
     }
   }
+}
+
+/**
+ * A successful look that also found a damaged live login file. The
+ * stored rows are the repair path (SPEC §7): switch one of them over
+ * the file. This is the opposite of `failed`, which hides the table.
+ */
+function DamagedLiveFileNote({
+  provider,
+  message,
+}: {
+  provider: ProviderDescriptor
+  message: string
+}) {
+  return (
+    <div className="mt-3 rounded-md border border-border-subtle p-3 text-sm">
+      <p>
+        {provider.displayName}&apos;s own login file is damaged, so this
+        application cannot tell which account the tool would use. Switching a
+        stored copy over that file (behind a restorable backup) is the recovery
+        path. This application will not rewrite a file it does not understand.
+      </p>
+      <p className="mt-2 text-ink-muted">{message}</p>
+    </div>
+  )
 }
 
 function LimitationNote({ children }: { children: React.ReactNode }) {
@@ -402,8 +370,11 @@ function AccountTable({
 }) {
   const unknownActiveId = `${headingId}-unknown-active`
   const activeKnown = accounts.some((account) => account.isActive)
-  const showActions =
-    (canSwitch || canDelete) && accounts.some((account) => account.isStored)
+  const showActions = accounts.some(
+    (account) =>
+      (canSwitch && account.isStored && !account.isIncomplete) ||
+      (canDelete && account.isStored),
+  )
 
   return (
     <>
@@ -432,7 +403,7 @@ function AccountTable({
               <th scope="col" className="py-2 pr-4">
                 Status
               </th>
-              <th scope="col" className={showActions ? 'py-2 pr-4' : 'py-2'}>
+              <th scope="col" className="py-2 pr-4">
                 Expires
               </th>
               {showActions && (
@@ -449,7 +420,12 @@ function AccountTable({
                   {presentOrAbsent(account.label, 'No label')}
                 </th>
                 <td className="py-2 pr-4 text-ink-muted">
-                  {presentOrAbsent(account.maskedIdentity, 'Not established')}
+                  {account.isIncomplete
+                    ? 'No usable credential'
+                    : presentOrAbsent(
+                        account.maskedIdentity,
+                        'Not established',
+                      )}
                 </td>
                 <td className="py-2 pr-4 text-ink-muted">{account.authKind}</td>
                 <td className="py-2 pr-4 text-ink-muted">
@@ -469,7 +445,9 @@ function AccountTable({
                     <AccountActions
                       account={account}
                       provider={provider}
-                      canSwitch={canSwitch && account.isStored}
+                      canSwitch={
+                        canSwitch && account.isStored && !account.isIncomplete
+                      }
                       canDelete={canDelete && account.isStored}
                       disabled={busy}
                       pending={
@@ -517,11 +495,16 @@ function presentOrAbsent(
 }
 
 /**
- * `isActive: false` on every row is not a negative check — the adapter
- * did not establish which identity the tool will use. Only say "Active"
- * when at least one row in the group is marked active.
+ * Incomplete is a structural fact about the stored directory, not a
+ * missing active-account probe. Say that first so a blank identity is
+ * not the only clue. `isActive: false` on every complete row is still
+ * not a negative check — only say "Active" when at least one row is
+ * marked active.
  */
 function statusLabel(account: Account, activeKnown: boolean): string {
+  if (account.isIncomplete) {
+    return 'Incomplete — sign-in never finished'
+  }
   if (!activeKnown) {
     return 'Not known'
   }
@@ -533,69 +516,4 @@ function hasCapability(
   capability: ProviderCapability,
 ): boolean {
   return provider.capabilities.includes(capability)
-}
-
-function noticeClass(tone: Notice['tone']): string {
-  if (tone === 'failure') {
-    return 'mb-4 rounded-md border border-border-subtle p-3 text-sm'
-  }
-  if (tone === 'progress') {
-    return 'mb-4 rounded-md border border-border-subtle bg-surface-raised p-3 text-sm'
-  }
-  return 'mb-4 text-sm text-ink-muted'
-}
-
-function progressMessage(
-  kind: PendingKind | 'add',
-  provider: ProviderDescriptor,
-  accountId: string,
-  accountName: string,
-): string {
-  if (kind === 'add') {
-    return `Adding ${accountId} to ${provider.displayName}. Sign-in is waiting in the terminal that launched this application; this window will update when it finishes.`
-  }
-  if (kind === 'switch') {
-    return `Switching ${provider.displayName} to ${accountName}…`
-  }
-  return `Deleting this application's stored copy of ${accountName}…`
-}
-
-function successMessage(
-  kind: PendingKind | 'add',
-  provider: ProviderDescriptor,
-  accountId: string,
-  accountName: string,
-): string {
-  if (kind === 'add') {
-    return `Added ${accountId} to ${provider.displayName}.`
-  }
-  if (kind === 'switch') {
-    return `Switched ${provider.displayName} to ${accountName}.`
-  }
-  return `Deleted this application's stored copy of ${accountName}.`
-}
-
-function failureLead(
-  kind: PendingKind | 'add',
-  provider: ProviderDescriptor,
-  accountId: string,
-  accountName: string,
-): string {
-  if (kind === 'add') {
-    return `Could not add ${accountId} to ${provider.displayName}:`
-  }
-  if (kind === 'switch') {
-    return `Could not switch ${provider.displayName} to ${accountName}:`
-  }
-  return `Could not delete ${accountName}:`
-}
-
-function commandErrorMessage(cause: unknown): string {
-  if (typeof cause === 'string' && cause.trim() !== '') {
-    return cause
-  }
-  if (cause instanceof Error && cause.message.trim() !== '') {
-    return cause.message
-  }
-  return 'The command failed without an error message.'
 }
