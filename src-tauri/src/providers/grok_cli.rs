@@ -274,6 +274,7 @@ fn account_from_entry(identity_key: &str, value: &Value) -> Result<Account> {
         // Entries live in the tool's own auth.json. This adapter stores
         // nothing, so mutating operations have nothing to act on.
         is_stored: false,
+        is_incomplete: false,
         expires_at,
     })
 }

@@ -78,7 +78,19 @@ pub struct Account {
     ///
     /// This is not a validity, currency, or vendor-acceptance signal.
     /// A stored copy may be expired, unused, or rejected by the vendor.
+    /// An incomplete row is still stored: `delete_account` can remove
+    /// the directory, but `activate_account` cannot use it.
     pub is_stored: bool,
+    /// True when this row is a managed directory that does not hold a
+    /// usable vendor document (`auth.json` that is a JSON object).
+    ///
+    /// An incomplete row is an abandoned add, not someone's credentials.
+    /// It is listed so the user can delete it rather than inferring that
+    /// from a missing identity. It is never `is_active`. Completeness is
+    /// structural: this is not a claim that a complete document is
+    /// current or accepted by the vendor.
+    #[serde(default)]
+    pub is_incomplete: bool,
     /// RFC 3339 timestamp, when the adapter can determine one.
     pub expires_at: Option<String>,
 }
@@ -128,6 +140,12 @@ pub enum AccountListOutcome {
     /// The adapter enumerated the API-key path only and does not inspect
     /// OAuth credentials. `accounts` may still be empty.
     ListedApiKeyOnly,
+    /// The adapter enumerated; `accounts` may be empty. Something is
+    /// wrong that the user needs to see — typically a damaged live
+    /// document — and is described by `error`. This is not a failure
+    /// of the look: stored copies are still listed. The error never
+    /// contains a credential value (NFR-1).
+    ListedWithError { error: AccountListError },
     /// The adapter returned `Error::NotImplemented`.
     NotImplemented,
     /// The adapter is implemented and the look failed.
@@ -259,6 +277,7 @@ mod tests {
             auth_kind: AuthKind::OAuth,
             is_active: true,
             is_stored: true,
+            is_incomplete: false,
             expires_at: None,
         };
         assert_eq!(
@@ -271,6 +290,7 @@ mod tests {
                 "authKind": "oauth",
                 "isActive": true,
                 "isStored": true,
+                "isIncomplete": false,
                 "expiresAt": null
             })
         );
@@ -283,6 +303,7 @@ mod tests {
             auth_kind: AuthKind::OAuth,
             is_active: true,
             is_stored: false,
+            is_incomplete: false,
             expires_at: None,
         };
         assert_eq!(
@@ -295,6 +316,33 @@ mod tests {
                 "authKind": "oauth",
                 "isActive": true,
                 "isStored": false,
+                "isIncomplete": false,
+                "expiresAt": null
+            })
+        );
+
+        let incomplete = Account {
+            id: "acct-abandoned".to_string(),
+            provider_id: "codex-cli".to_string(),
+            label: "acct-abandoned".to_string(),
+            masked_identity: None,
+            auth_kind: AuthKind::Unknown,
+            is_active: false,
+            is_stored: true,
+            is_incomplete: true,
+            expires_at: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&incomplete).unwrap(),
+            serde_json::json!({
+                "id": "acct-abandoned",
+                "providerId": "codex-cli",
+                "label": "acct-abandoned",
+                "maskedIdentity": null,
+                "authKind": "unknown",
+                "isActive": false,
+                "isStored": true,
+                "isIncomplete": true,
                 "expiresAt": null
             })
         );
@@ -329,6 +377,24 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AccountListOutcome::ListedApiKeyOnly).unwrap(),
             r#"{"kind":"listed-api-key-only"}"#
+        );
+        let listed_with_error = AccountListOutcome::ListedWithError {
+            error: AccountListError {
+                kind: AccountListErrorKind::ConfigRead,
+                path: Some("/tmp/auth.json".to_string()),
+                message: "configuration for `codex-cli` could not be read: /tmp/auth.json is not valid JSON".to_string(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&listed_with_error).unwrap(),
+            serde_json::json!({
+                "kind": "listed-with-error",
+                "error": {
+                    "kind": "config-read",
+                    "path": "/tmp/auth.json",
+                    "message": "configuration for `codex-cli` could not be read: /tmp/auth.json is not valid JSON"
+                }
+            })
         );
         assert_eq!(
             serde_json::to_string(&AccountListOutcome::NotImplemented).unwrap(),

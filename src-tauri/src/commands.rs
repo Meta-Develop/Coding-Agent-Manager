@@ -10,6 +10,8 @@ use crate::model::{
     ProviderDescriptor, QuotaSnapshot,
 };
 use crate::providers;
+use crate::providers::codex_cli::CodexCliAdapter;
+use crate::providers::ProviderAdapter;
 
 /// Providers whose `list_accounts` inspects only an API key, not OAuth.
 ///
@@ -45,8 +47,40 @@ fn collect_account_listings(provider_id: Option<&str>) -> Vec<ProviderAccountLis
     };
     adapters
         .iter()
-        .map(|adapter| listing_from_result(adapter.id(), adapter.list_accounts()))
+        .map(|adapter| listing_for(adapter.as_ref()))
         .collect()
+}
+
+/// Codex can enumerate stored copies when the live document is damaged.
+/// The trait still returns `Result<Vec<Account>>`, so a listing+warning
+/// has to be recovered from the concrete type. Other adapters keep the
+/// existing `Ok` / `Err` mapping. A trait method that returned both
+/// would remove this branch.
+fn listing_for(adapter: &dyn ProviderAdapter) -> ProviderAccountList {
+    if adapter.id() == "codex-cli" {
+        return listing_from_detailed(
+            "codex-cli",
+            CodexCliAdapter::default().list_accounts_detailed(),
+        );
+    }
+    listing_from_result(adapter.id(), adapter.list_accounts())
+}
+
+fn listing_from_detailed(
+    provider_id: &str,
+    result: Result<(Vec<Account>, Option<Error>)>,
+) -> ProviderAccountList {
+    match result {
+        Ok((accounts, Some(error))) => ProviderAccountList {
+            provider_id: provider_id.to_string(),
+            accounts,
+            outcome: AccountListOutcome::ListedWithError {
+                error: account_list_error(&error),
+            },
+        },
+        Ok((accounts, None)) => listing_from_result(provider_id, Ok(accounts)),
+        Err(error) => listing_from_result(provider_id, Err(error)),
+    }
 }
 
 fn listing_from_result(provider_id: &str, result: Result<Vec<Account>>) -> ProviderAccountList {
@@ -176,6 +210,7 @@ mod tests {
             auth_kind: AuthKind::ApiKey,
             is_active: true,
             is_stored: false,
+            is_incomplete: false,
             expires_at: None,
         }
     }
@@ -281,6 +316,38 @@ mod tests {
             panic!("expected Failed, got {:?}", listing.outcome);
         };
         assert_eq!(error.kind, AccountListErrorKind::Other);
+    }
+
+    #[test]
+    fn listed_with_error_keeps_accounts_and_the_live_error() {
+        let listing = listing_from_detailed(
+            "codex-cli",
+            Ok((
+                vec![sample_account("codex-cli")],
+                Some(Error::ConfigRead {
+                    provider: "codex-cli".to_string(),
+                    reason: "/tmp/cam-test/auth.json is not valid JSON".to_string(),
+                }),
+            )),
+        );
+        assert_eq!(listing.accounts.len(), 1);
+        let AccountListOutcome::ListedWithError { error } = listing.outcome else {
+            panic!("expected ListedWithError, got {:?}", listing.outcome);
+        };
+        assert_eq!(error.kind, AccountListErrorKind::ConfigRead);
+        assert_eq!(error.path.as_deref(), Some("/tmp/cam-test/auth.json"));
+        assert!(
+            !error.message.contains("FAKE-"),
+            "surfaced error leaked fixture secret material: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn listed_with_no_live_error_stays_listed() {
+        let listing = listing_from_detailed("codex-cli", Ok((Vec::new(), None)));
+        assert!(listing.accounts.is_empty());
+        assert_eq!(listing.outcome, AccountListOutcome::Listed);
     }
 
     #[test]

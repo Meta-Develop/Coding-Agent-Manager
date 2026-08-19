@@ -411,48 +411,90 @@ impl CodexCliAdapter {
         Ok(())
     }
 
-    /// Live `auth.json` bytes plus the Account that file represents.
+    /// Live `auth.json` bytes plus the Account that file represents, or
+    /// the reason the live document cannot be used.
     ///
-    /// A missing file is `(None, None)`. A malformed file is `Err`, which
-    /// fails the whole `list_accounts` call — including managed accounts
-    /// that would otherwise parse. `list_accounts` returns `Vec<Account>`
-    /// or an error, not both, so a damaged live slot cannot be reported
-    /// alongside readable stored copies. That is a known ceiling, not an
-    /// oversight: a richer result type would be required to split them.
-    fn live_slot(&self) -> Result<(Option<Vec<u8>>, Option<Account>)> {
+    /// A missing file is [`LiveSlot::Absent`] — stored copies still list
+    /// and nothing is active. A file that exists but is unreadable or
+    /// is not a JSON object is [`LiveSlot::Damaged`]: stored copies still
+    /// list (the user needs them to repair the live file) and nothing is
+    /// active, because there is nothing safe to compare against.
+    fn live_slot(&self) -> LiveSlot {
         let Some(path) = self.codex_home().map(|root| root.join("auth.json")) else {
-            return Ok((None, None));
+            return LiveSlot::Absent;
         };
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok((None, None)),
+            Err(error) if error.kind() == ErrorKind::NotFound => return LiveSlot::Absent,
             Err(error) => {
-                return Err(self.config_read(format!("{} ({})", path.display(), error.kind())));
+                return LiveSlot::Damaged(self.config_read(format!(
+                    "{} ({})",
+                    path.display(),
+                    error.kind()
+                )));
             }
         };
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|_| self.config_read(format!("{} is not valid JSON", path.display())))?;
-        let Some(object) = value.as_object() else {
-            return Err(self.config_read(format!("{} is not a JSON object", path.display())));
+        let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return LiveSlot::Damaged(
+                    self.config_read(format!("{} is not valid JSON", path.display())),
+                );
+            }
         };
-        Ok((
-            Some(bytes),
-            Some(account_from_auth(
+        let Some(object) = value.as_object() else {
+            return LiveSlot::Damaged(
+                self.config_read(format!("{} is not a JSON object", path.display())),
+            );
+        };
+        LiveSlot::Present {
+            bytes,
+            account: account_from_auth(
                 self.id(),
                 ON_DISK_ACCOUNT_ID,
                 "Codex CLI",
                 object,
                 true,
                 false,
-            )),
-        ))
+            ),
+        }
     }
 
-    /// Stored per-account directories that hold an `auth.json` JSON object.
+    /// Enumerate live and stored accounts. A damaged live document is
+    /// reported alongside the stored copies rather than hiding them.
     ///
-    /// A missing, unreadable, or unparsable `auth.json` is skipped rather
-    /// than failing the whole list: one corrupt stored copy must not hide
-    /// the others. Directory-listing I/O on the managed root still errors.
+    /// The second value is `Some` only when the live file exists and
+    /// cannot be used as a JSON object. A missing live file is `None`
+    /// — that already degrades gracefully. The error never includes
+    /// file contents or serde's text (NFR-1).
+    pub fn list_accounts_detailed(&self) -> Result<(Vec<Account>, Option<Error>)> {
+        let (live_bytes, live_account, live_error) = match self.live_slot() {
+            LiveSlot::Absent => (None, None, None),
+            LiveSlot::Present { bytes, account } => (Some(bytes), Some(account), None),
+            LiveSlot::Damaged(error) => (None, None, Some(error)),
+        };
+        let mut managed = self.managed_slots(live_bytes.as_deref())?;
+        let managed_has_active = managed.iter().any(|account| account.is_active);
+
+        let mut accounts = Vec::new();
+        if let Some(account) = live_account {
+            if !managed_has_active {
+                accounts.push(account);
+            }
+        }
+        accounts.append(&mut managed);
+        Ok((accounts, live_error))
+    }
+
+    /// Stored per-account directories.
+    ///
+    /// A real directory with a JSON-object `auth.json` is a usable stored
+    /// copy. A real directory with no `auth.json` is an abandoned add:
+    /// listed as incomplete so the user can delete it. A directory whose
+    /// `auth.json` exists but is unreadable or not a JSON object is
+    /// skipped rather than failing the whole list: one corrupt stored
+    /// copy must not hide the others. Directory-listing I/O on the
+    /// managed root still errors.
     fn managed_slots(&self, live_bytes: Option<&[u8]>) -> Result<Vec<Account>> {
         let Some(data_dir) = self.resolved_data_dir() else {
             return Ok(Vec::new());
@@ -466,7 +508,7 @@ impl CodexCliAdapter {
             }
         };
 
-        let mut documents = Vec::new();
+        let mut slots = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|error| {
                 self.config_read(format!("{} ({})", root.display(), error.kind()))
@@ -489,6 +531,16 @@ impl CodexCliAdapter {
                 continue;
             }
             let path = managed_account_dir(&data_dir, self.id(), account_id).join("auth.json");
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    slots.push(ManagedSlot::Incomplete {
+                        account_id: account_id.to_string(),
+                    });
+                    continue;
+                }
+                Err(_) => continue,
+                Ok(_) => {}
+            }
             let Ok(bytes) = fs::read(&path) else {
                 continue;
             };
@@ -498,46 +550,72 @@ impl CodexCliAdapter {
             let Some(object) = value.as_object() else {
                 continue;
             };
-            documents.push((account_id.to_string(), bytes, object.clone()));
+            slots.push(ManagedSlot::Complete {
+                account_id: account_id.to_string(),
+                bytes,
+                object: object.clone(),
+            });
         }
-        documents.sort_by(|left, right| left.0.cmp(&right.0));
+        slots.sort_by(|left, right| left.account_id().cmp(right.account_id()));
 
         let mut claimed_active = false;
-        let mut accounts = Vec::with_capacity(documents.len());
-        for (account_id, bytes, object) in documents {
-            let is_active = live_bytes == Some(bytes.as_slice()) && !claimed_active;
-            if is_active {
-                claimed_active = true;
+        let mut accounts = Vec::with_capacity(slots.len());
+        for slot in slots {
+            match slot {
+                ManagedSlot::Incomplete { account_id } => {
+                    accounts.push(incomplete_account(self.id(), &account_id));
+                }
+                ManagedSlot::Complete {
+                    account_id,
+                    bytes,
+                    object,
+                } => {
+                    let is_active = live_bytes == Some(bytes.as_slice()) && !claimed_active;
+                    if is_active {
+                        claimed_active = true;
+                    }
+                    accounts.push(account_from_auth(
+                        self.id(),
+                        &account_id,
+                        &account_id,
+                        &object,
+                        is_active,
+                        true,
+                    ));
+                }
             }
-            accounts.push(account_from_auth(
-                self.id(),
-                &account_id,
-                &account_id,
-                &object,
-                is_active,
-                true,
-            ));
         }
         Ok(accounts)
     }
 
-    /// Create a new owner-only directory at `dir`.
+    /// Prepare the per-account directory at `dir`.
     ///
-    /// Any existing directory entry — file, directory, or symlink,
-    /// including a dangling one — is refused. `Path::exists` follows
-    /// links, so a dangling symlink would look absent, and
-    /// `create_dir_all` is idempotent, so an existing directory would
-    /// be reused. Either would let a later failure `remove_dir_all` a
-    /// path this call did not create, or walk through a planted link.
-    /// Parents are created as needed; only the leaf is exclusive, so
-    /// cleanup cannot remove the provider's accounts tree.
-    fn create_fresh_managed_dir(&self, dir: &Path) -> Result<()> {
+    /// A missing leaf is created owner-only. A real directory that holds
+    /// no `auth.json` is an abandoned add and is reused. A directory that
+    /// already holds an `auth.json`, a symlink (including a dangling one),
+    /// or a non-directory is refused. `Path::exists` follows links, so a
+    /// dangling symlink would look absent, and `create_dir_all` is
+    /// idempotent, so a complete directory would be reused. Either would
+    /// let a later failure `remove_dir_all` a path this call did not
+    /// create, or walk through a planted link. Parents are created as
+    /// needed; only the leaf is exclusive, so cleanup cannot remove the
+    /// provider's accounts tree.
+    fn prepare_managed_dir(&self, dir: &Path) -> Result<()> {
         match fs::symlink_metadata(dir) {
-            Ok(_) => {
-                return Err(self.config_write(format!(
-                    "{} already exists; refusing to overwrite a managed account directory",
-                    dir.display()
-                )));
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(self.config_write(format!(
+                        "{} already exists; refusing to overwrite a managed account directory",
+                        dir.display()
+                    )));
+                }
+                if self.slot_holds_auth_json(dir) {
+                    return Err(self.config_write(format!(
+                        "{} already exists; refusing to overwrite a managed account directory",
+                        dir.display()
+                    )));
+                }
+                return Ok(());
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => {
@@ -566,6 +644,79 @@ impl CodexCliAdapter {
             }
         })
     }
+
+    /// Whether `dir` already holds an `auth.json` directory entry.
+    ///
+    /// Presence, not parsability: a file, symlink, or unreadable entry
+    /// named `auth.json` is someone's (or something's) credential
+    /// material, not an abandoned add. An I/O error other than NotFound
+    /// is treated as occupied so we do not overwrite what we cannot see.
+    fn slot_holds_auth_json(&self, dir: &Path) -> bool {
+        match fs::symlink_metadata(dir.join("auth.json")) {
+            Ok(_) => true,
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
+            Err(_) => true,
+        }
+    }
+
+    /// Remove a half-created managed directory after a failed add.
+    ///
+    /// When `remove_dir_all` fails or the path is still present, the
+    /// original login error is kept and the leftover path is named so
+    /// the user can remove credential material by hand. Never includes
+    /// file contents (NFR-1).
+    fn cleanup_failed_add(&self, dir: &Path, error: Error) -> Error {
+        let original = match error {
+            Error::ConfigWrite { reason, .. } => reason,
+            other => other.to_string(),
+        };
+        match fs::remove_dir_all(dir) {
+            Ok(()) if fs::symlink_metadata(dir).is_err() => self.config_write(original),
+            Ok(()) => self.config_write(format!(
+                "{original}; could not fully remove {}; credential material may remain at {}",
+                dir.display(),
+                leftover_managed_path(dir).display()
+            )),
+            Err(cleanup_error) => self.config_write(format!(
+                "{original}; could not fully remove {} ({}); credential material may remain at {}",
+                dir.display(),
+                cleanup_error.kind(),
+                leftover_managed_path(dir).display()
+            )),
+        }
+    }
+}
+
+/// A stored per-account directory, complete or abandoned.
+enum ManagedSlot {
+    Complete {
+        account_id: String,
+        bytes: Vec<u8>,
+        object: serde_json::Map<String, serde_json::Value>,
+    },
+    Incomplete {
+        account_id: String,
+    },
+}
+
+impl ManagedSlot {
+    fn account_id(&self) -> &str {
+        match self {
+            Self::Complete { account_id, .. } | Self::Incomplete { account_id } => account_id,
+        }
+    }
+}
+
+/// The live Codex identity, or why it cannot be used as a comparison.
+enum LiveSlot {
+    /// No live `auth.json`. Stored copies list; nothing is active.
+    Absent,
+    /// A JSON-object live document. `account` is the on-disk row.
+    Present { bytes: Vec<u8>, account: Account },
+    /// The live file exists but is unreadable or is not a JSON object.
+    /// Stored copies still list; nothing is active. Never carries file
+    /// contents or serde's text (NFR-1).
+    Damaged(Error),
 }
 
 /// Mask a vendor identifier for display.
@@ -629,9 +780,27 @@ fn account_from_auth(
         auth_kind,
         is_active,
         is_stored,
+        is_incomplete: false,
         // `last_refresh` is a refresh timestamp, not an expiry [verified-local].
         // Inventing `expires_at` from it would fabricate a capability the file
         // does not provide (NFR-8).
+        expires_at: None,
+    }
+}
+
+/// A managed directory this application created that holds no usable
+/// `auth.json`. Listed so it can be deleted; never active; never a
+/// guess at identity from an empty folder.
+fn incomplete_account(provider_id: &str, account_id: &str) -> Account {
+    Account {
+        id: account_id.to_string(),
+        provider_id: provider_id.to_string(),
+        label: account_id.to_string(),
+        masked_identity: None,
+        auth_kind: AuthKind::Unknown,
+        is_active: false,
+        is_stored: true,
+        is_incomplete: true,
         expires_at: None,
     }
 }
@@ -690,27 +859,19 @@ impl ProviderAdapter for CodexCliAdapter {
         // second active account would be a lie, and listing it as inactive
         // would deny that its file is the one in use. If no managed
         // document matches, the live slot is reported active. If there is
-        // no live `auth.json`, no account is active — we do not guess that
-        // a stored copy is in use. Two stored copies of the same bytes
-        // would both match; only the first in sorted id order is marked
-        // active so we never claim two accounts are both active.
+        // no live `auth.json`, or the live file is damaged, no account is
+        // active — we do not guess that a stored copy is in use, and we
+        // cannot compare against bytes we could not read. Two stored
+        // copies of the same bytes would both match; only the first in
+        // sorted id order is marked active so we never claim two accounts
+        // are both active.
         //
-        // A malformed live `auth.json` still fails this whole call
-        // (`live_slot`), even when every managed copy is readable.
-        // Returning a partial `Vec` would hide the damage; a richer
-        // result type is out of scope here.
-        let (live_bytes, live_account) = self.live_slot()?;
-        let mut managed = self.managed_slots(live_bytes.as_deref())?;
-        let managed_has_active = managed.iter().any(|account| account.is_active);
-
-        let mut accounts = Vec::new();
-        if let Some(account) = live_account {
-            if !managed_has_active {
-                accounts.push(account);
-            }
-        }
-        accounts.append(&mut managed);
-        Ok(accounts)
+        // A damaged live document is not a failed look. Stored copies
+        // still list (`list_accounts_detailed`); the live error travels
+        // with them so the caller can say the file is damaged instead of
+        // hiding either fact.
+        self.list_accounts_detailed()
+            .map(|(accounts, _live_error)| accounts)
     }
 
     fn activate_account(&self, account_id: &str) -> Result<()> {
@@ -823,24 +984,31 @@ impl ProviderAdapter for CodexCliAdapter {
                 "account id is not a safe path component; refusing to create a managed directory",
             ));
         }
+        if account_id == ON_DISK_ACCOUNT_ID {
+            return Err(self.config_write(format!(
+                "`{account_id}` is reserved for the live on-disk Codex identity; \
+                 choose a different account id"
+            )));
+        }
         let Some(data_dir) = self.resolved_data_dir() else {
             return Err(self.config_write(
                 "application data directory is unavailable; cannot create a managed account",
             ));
         };
         let dir = managed_account_dir(&data_dir, self.id(), account_id);
-        self.create_fresh_managed_dir(&dir)?;
+        self.prepare_managed_dir(&dir)?;
 
-        // `dir` was created by this call. Failure after this point removes
-        // only that directory, never a parent that may already hold other
-        // accounts and never the provider's accounts tree.
+        // `dir` was created by this call, or was an abandoned slot this
+        // call reused. Failure after this point removes only that
+        // directory, never a parent that may already hold other accounts
+        // and never the provider's accounts tree.
         let outcome = self
             .run_vendor_login(&dir)
             .and_then(|()| self.require_auth_json(&dir));
-        if outcome.is_err() {
-            let _ = fs::remove_dir_all(&dir);
+        if let Err(error) = outcome {
+            return Err(self.cleanup_failed_add(&dir, error));
         }
-        outcome
+        Ok(())
     }
 
     fn delete_account(&self, account_id: &str) -> Result<()> {
@@ -1069,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn list_accounts_rejects_malformed_auth_json() {
+    fn list_accounts_treats_malformed_live_auth_json_as_uncomparable() {
         // Written here rather than stored as a `.json` fixture: Prettier parses
         // tracked `*.json` and refuses this intentionally invalid document.
         let home = tempfile::tempdir().expect("tempdir");
@@ -1081,12 +1249,26 @@ mod tests {
         )
         .expect("write malformed auth.json");
         let adapter = CodexCliAdapter::with_home(home.path());
-        let error = adapter
+        let accounts = adapter
             .list_accounts()
-            .expect_err("unparsable auth.json must not be guessed at");
+            .expect("a damaged live file must not fail the look");
+        assert!(
+            accounts.is_empty(),
+            "no stored copies and nothing comparable: {accounts:?}"
+        );
+
+        let (detailed, live_error) = adapter
+            .list_accounts_detailed()
+            .expect("damage is reported, not a failed look");
+        assert!(detailed.is_empty());
+        let error = live_error.expect("the caller must be told the live file is damaged");
         assert!(
             matches!(error, Error::ConfigRead { .. }),
             "expected ConfigRead, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("auth.json"),
+            "user must be told which file is damaged: {error}"
         );
         assert_no_fake("ConfigRead Display", &error.to_string());
         assert_no_fake("ConfigRead Debug", &format!("{error:?}"));
@@ -1554,6 +1736,10 @@ mod tests {
             fs::create_dir_all(&dir).expect("managed dir");
             fs::write(dir.join("auth.json"), auth).expect("managed auth");
         }
+
+        fn seed_incomplete(&self, account_id: &str) {
+            fs::create_dir_all(self.managed_dir(account_id)).expect("incomplete managed dir");
+        }
     }
 
     fn assert_add_error_is_clean(error: &Error) {
@@ -1622,6 +1808,10 @@ mod tests {
         assert!(
             !added.is_active,
             "a new stored copy is not the live identity"
+        );
+        assert!(
+            !added.is_incomplete,
+            "a login that wrote auth.json is a complete stored copy"
         );
         assert!(
             accounts
@@ -1733,6 +1923,59 @@ mod tests {
         assert_eq!(before, env.digest());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn add_account_reports_leftover_path_when_cleanup_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct RestorePerms(std::path::PathBuf);
+        impl Drop for RestorePerms {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+            }
+        }
+
+        let env = AddEnv::new();
+        let expected_dir = env.managed_dir(ADDED_ACCOUNT);
+        let nested = expected_dir.join("nested");
+
+        fn login_leaves_undeletable_tree(dir: &Path) -> std::io::Result<i32> {
+            let nested = dir.join("nested");
+            fs::create_dir(&nested)?;
+            fs::write(nested.join("stuck"), b"x")?;
+            fs::set_permissions(&nested, fs::Permissions::from_mode(0o000))?;
+            Ok(1)
+        }
+
+        let error = env
+            .adapter(login_leaves_undeletable_tree)
+            .add_account(ADDED_ACCOUNT)
+            .expect_err("nonzero login plus failed cleanup");
+        let _restore = RestorePerms(nested);
+        assert!(
+            matches!(error, Error::ConfigWrite { .. }),
+            "expected ConfigWrite, got {error:?}"
+        );
+        let display = error.to_string();
+        assert!(
+            display.contains("exited with status 1"),
+            "user must still be told the login failed: {error}"
+        );
+        assert!(
+            display.contains("credential material may remain"),
+            "user must be told leftover material may remain: {error}"
+        );
+        assert!(
+            display.contains(&expected_dir.display().to_string()),
+            "user must be told the leftover path: {error}"
+        );
+        assert_add_error_is_clean(&error);
+        assert!(
+            fs::symlink_metadata(&expected_dir).is_ok(),
+            "the abandoned directory is still there so the leftover path is real"
+        );
+    }
+
     #[test]
     fn add_account_refuses_an_existing_managed_directory_without_changing_it() {
         let env = AddEnv::new();
@@ -1766,6 +2009,63 @@ mod tests {
             "existing managed directory contents must be unchanged"
         );
         assert_eq!(before_live, env.digest());
+    }
+
+    #[test]
+    fn add_account_reuses_an_incomplete_slot_that_holds_no_auth_json() {
+        let env = AddEnv::new();
+        env.seed_incomplete(ADDED_ACCOUNT);
+        fs::write(env.managed_dir(ADDED_ACCOUNT).join("partial"), b"leftover").expect("partial");
+        let before = env.digest();
+
+        env.adapter(login_writes_managed_oauth)
+            .add_account(ADDED_ACCOUNT)
+            .expect("reuse abandoned slot");
+
+        let dir = env.managed_dir(ADDED_ACCOUNT);
+        assert_eq!(
+            fs::read(dir.join("auth.json")).expect("read added auth.json"),
+            managed_oauth_bytes(),
+            "login must write auth.json into the reused directory"
+        );
+        let added = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list after reuse")
+            .into_iter()
+            .find(|account| account.id == ADDED_ACCOUNT)
+            .expect("reused slot must list as a complete account");
+        assert!(!added.is_incomplete);
+        assert!(added.is_stored);
+        assert!(!added.is_active);
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn add_account_refuses_the_live_on_disk_id() {
+        let env = AddEnv::new();
+        let before = env.digest();
+
+        let error = env
+            .adapter(login_must_not_run)
+            .add_account(ON_DISK_ACCOUNT_ID)
+            .expect_err("reserved id");
+        assert!(
+            matches!(error, Error::ConfigWrite { .. }),
+            "expected ConfigWrite, got {error:?}"
+        );
+        let display = error.to_string();
+        assert!(
+            display.contains(ON_DISK_ACCOUNT_ID),
+            "user must be told which id is reserved: {error}"
+        );
+        assert!(
+            display.contains("reserved"),
+            "user must be told the id is reserved: {error}"
+        );
+        assert_add_error_is_clean(&error);
+        assert_no_managed_leaf(&env, ON_DISK_ACCOUNT_ID);
+        assert_eq!(before, env.digest());
     }
 
     #[test]
@@ -1966,11 +2266,10 @@ mod tests {
     }
 
     #[test]
-    fn list_accounts_skips_a_malformed_or_missing_managed_auth_json_without_hiding_others() {
+    fn list_accounts_skips_a_malformed_managed_auth_json_without_hiding_others() {
         let env = AddEnv::new();
         env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
         env.seed_managed("acct-bad", b"{this is not json");
-        fs::create_dir_all(env.managed_dir("acct-empty")).expect("empty managed dir");
         let before = env.digest();
 
         let accounts = env
@@ -1990,9 +2289,45 @@ mod tests {
             !ids.contains(&"acct-bad"),
             "a malformed managed auth.json must be skipped: {ids:?}"
         );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn list_accounts_lists_an_incomplete_slot_so_it_can_be_deleted() {
+        let env = AddEnv::new();
+        env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
+        fs::create_dir_all(env.managed_dir("acct-empty")).expect("empty managed dir");
+        let before = env.digest();
+
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list");
+        let incomplete = accounts
+            .iter()
+            .find(|account| account.id == "acct-empty")
+            .expect("an abandoned add must be listed so it can be deleted");
         assert!(
-            !ids.contains(&"acct-empty"),
-            "a managed directory with no auth.json must be skipped: {ids:?}"
+            incomplete.is_incomplete,
+            "an empty managed directory is not a usable account"
+        );
+        assert!(
+            incomplete.is_stored,
+            "delete_account can remove the abandoned directory"
+        );
+        assert!(
+            !incomplete.is_active,
+            "an incomplete slot cannot be the live identity"
+        );
+        assert_eq!(incomplete.auth_kind, AuthKind::Unknown);
+        assert_eq!(incomplete.masked_identity, None);
+        assert!(
+            !accounts
+                .iter()
+                .find(|account| account.id == ADDED_ACCOUNT)
+                .expect("complete sibling")
+                .is_incomplete,
+            "a usable stored copy is not incomplete"
         );
         assert_eq!(before, env.digest());
     }
@@ -2031,7 +2366,10 @@ mod tests {
     }
 
     #[test]
-    fn list_accounts_fails_when_live_auth_json_is_malformed_even_if_managed_accounts_parse() {
+    fn list_accounts_lists_stored_copies_when_live_auth_json_is_malformed() {
+        // Previously this failed the whole look, which hid the stored
+        // copies the user needs to repair the live file. A damaged live
+        // document is now a warning on the listing, not an empty Failed.
         let env = AddEnv::new();
         env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
         fs::write(
@@ -2040,13 +2378,37 @@ mod tests {
         )
         .expect("malformed live auth.json");
 
-        let error = env
-            .adapter(login_must_not_run)
+        let adapter = env.adapter(login_must_not_run);
+        let accounts = adapter
             .list_accounts()
-            .expect_err("malformed live auth.json must fail the whole list");
+            .expect("a damaged live file must not hide stored copies");
+        let ids: Vec<&str> = accounts.iter().map(|account| account.id.as_str()).collect();
+        assert!(
+            ids.contains(&ADDED_ACCOUNT),
+            "stored copy missing while live is damaged: {ids:?}"
+        );
+        assert!(
+            accounts.iter().all(|account| !account.is_active),
+            "nothing can be compared against a damaged live file"
+        );
+        assert!(
+            accounts
+                .iter()
+                .all(|account| account.id != ON_DISK_ACCOUNT_ID),
+            "a damaged live file is not a live row: {ids:?}"
+        );
+
+        let (_accounts, live_error) = adapter
+            .list_accounts_detailed()
+            .expect("damage is reported, not a failed look");
+        let error = live_error.expect("the caller must be told the live file is damaged");
         assert!(
             matches!(error, Error::ConfigRead { .. }),
             "expected ConfigRead, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("auth.json"),
+            "user must be told which file is damaged: {error}"
         );
         assert_no_fake("ConfigRead Display", &error.to_string());
         assert_no_fake("ConfigRead Debug", &format!("{error:?}"));
@@ -2089,6 +2451,58 @@ mod tests {
     fn assert_delete_error_is_clean(error: &Error) {
         assert_no_fake("delete_account Display", &error.to_string());
         assert_no_fake("delete_account Debug", &format!("{error:?}"));
+    }
+
+    #[test]
+    fn delete_account_removes_an_incomplete_slot() {
+        let env = AddEnv::new();
+        env.seed_incomplete(ADDED_ACCOUNT);
+        env.seed_managed(SIBLING_ACCOUNT, &managed_oauth_bytes());
+        let before = env.digest();
+
+        env.adapter(login_must_not_run)
+            .delete_account(ADDED_ACCOUNT)
+            .expect("delete incomplete");
+
+        assert!(
+            fs::symlink_metadata(env.managed_dir(ADDED_ACCOUNT)).is_err(),
+            "abandoned directory must be gone after delete"
+        );
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list after delete");
+        assert!(
+            accounts.iter().all(|account| account.id != ADDED_ACCOUNT),
+            "deleted incomplete slot must stop being listed"
+        );
+        assert!(
+            accounts.iter().any(|account| account.id == SIBLING_ACCOUNT),
+            "sibling account must still be listed"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn activate_account_rejects_an_incomplete_slot_without_touching_the_live_home() {
+        let env = AddEnv::new();
+        env.seed_incomplete(ADDED_ACCOUNT);
+        let before = env.digest();
+
+        let error = env
+            .adapter(login_must_not_run)
+            .with_tool_running(false)
+            .activate_account(ADDED_ACCOUNT)
+            .expect_err("incomplete slot cannot be activated");
+        assert!(
+            matches!(error, Error::UnknownAccount(ref id) if id == ADDED_ACCOUNT),
+            "expected UnknownAccount, got {error:?}"
+        );
+        assert_eq!(before, env.digest());
+        assert!(
+            !env.data.path().join("backups").exists(),
+            "incomplete slot must not write a backup"
+        );
     }
 
     #[test]
