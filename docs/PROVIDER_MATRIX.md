@@ -17,16 +17,28 @@ listed in each research note.
 
 ## What this implies for sequencing
 
+Codex CLI and Grok CLI now list accounts from their on-disk `auth.json` files.
+Claude Code lists the on-disk identity by reading `.credentials.json` and
+`~/.claude.json`. Gemini CLI lists an account when `GEMINI_API_KEY` is set. It
+does not list OAuth accounts: the adapter still reads only `GEMINI_API_KEY`,
+not the OAuth files vendor source now names. No adapter implements switching.
+Codex switching strategies are `[inferred]`, and how
+Grok CLI selects the active identity is `[unknown]`. The remaining order is
+unchanged.
+
 1. **Codex CLI first.** It is the only provider whose entire credential state is
-   one readable document, which makes it the cheapest way to prove the adapter
-   contract, the backup subsystem, and the switch verification path end to end.
-2. **Grok CLI second.** Its multi-identity file exercises the "several accounts
-   coexist" case that the domain model assumes, and forces the advisory-lock
-   handling that other adapters will also need.
-3. **Claude Code third.** It introduces the two-file switch, which is the first
-   case where atomicity across more than one file actually matters.
-4. **Gemini CLI fourth**, starting with the API-key path, which is file-free and
-   therefore low-risk, and deferring OAuth until a signed-in host is available.
+   one readable document. Listing that document is in place. The switch
+   verification path is still the cheapest remaining end-to-end proof.
+2. **Grok CLI second.** Its multi-identity file already exercises the "several
+   accounts coexist" case that the domain model assumes. Switching still needs
+   the advisory-lock handling that other adapters will also need.
+3. **Claude Code third.** Listing the two-file identity is in place. A switch
+   must still move both files together, which is the first case where
+   atomicity across more than one file actually matters.
+4. **Gemini CLI fourth.** Listing the API-key path is in place. This adapter
+   still reads only `GEMINI_API_KEY` and does not list OAuth accounts. An
+   OAuth switch remains unimplementable until a signed-in host observation
+   closes the remaining `[unknown]` write-path questions.
 5. **Cursor last**, and read-only until its credential handling is established.
    Writing a switch for a store you have not found is how you lock a user out.
 

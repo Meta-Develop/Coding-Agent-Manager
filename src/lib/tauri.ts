@@ -1,5 +1,9 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { Account, ProviderDescriptor, QuotaSnapshot } from '@/types'
+import type {
+  ProviderAccountList,
+  ProviderDescriptor,
+  QuotaSnapshot,
+} from '@/types'
 
 /**
  * Typed wrappers around the Tauri command surface.
@@ -12,8 +16,12 @@ export function listProviders(): Promise<ProviderDescriptor[]> {
   return invoke<ProviderDescriptor[]>('list_providers')
 }
 
-export function listAccounts(providerId?: string): Promise<Account[]> {
-  return invoke<Account[]>('list_accounts', { providerId: providerId ?? null })
+export function listAccounts(
+  providerId?: string,
+): Promise<ProviderAccountList[]> {
+  return invoke<ProviderAccountList[]>('list_accounts', {
+    providerId: providerId ?? null,
+  })
 }
 
 export function activateAccount(accountId: string): Promise<void> {
