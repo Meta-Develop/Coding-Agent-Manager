@@ -142,7 +142,11 @@ describe('Accounts page', () => {
 
     await screen.findByRole('table')
     expect(screen.getByText(/own login file is damaged/i)).toBeInTheDocument()
-    expect(screen.getByText(/auth\.json is not valid JSON/)).toBeInTheDocument()
+    // The adapter path is an inline <code>, so the sentence is no longer
+    // one text node. The notice still carries the same error text.
+    expect(
+      screen.getByText(/own login file is damaged/i).parentElement,
+    ).toHaveTextContent(/auth\.json is not valid JSON/)
     expect(screen.queryByText(/Looking failed/i)).not.toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: 'Switch to Work' }),

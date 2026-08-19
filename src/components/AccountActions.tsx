@@ -1,81 +1,43 @@
 import { useId, type KeyboardEvent, type ReactNode } from 'react'
-import type { Account, ProviderDescriptor } from '@/types'
+import type { Account } from '@/types'
 
 const controlFocus =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
-const buttonClass = `rounded-md border border-border-subtle px-3 py-1.5 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
+const buttonClass = `whitespace-nowrap rounded-md border border-border-subtle px-3 py-1.5 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
 
-const confirmClass = `rounded-md border border-accent bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
+const confirmClass = `whitespace-nowrap rounded-md border border-accent bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
 
 export type PendingKind = 'switch' | 'delete'
 
 /**
  * Per-row switch and delete, gated by the adapter's capabilities and
  * whether this application holds a stored copy of the row. Incomplete
- * rows can be deleted but never switched. Confirm and Cancel sit on
- * the row rather than in a dialog so they stay in the tab order without
- * a focus trap (`NFR-6`).
+ * rows can be deleted but never switched. Confirm and Cancel sit in a
+ * following table row rather than in a dialog so they stay in the tab
+ * order without a focus trap (`NFR-6`).
  */
 export default function AccountActions({
   account,
-  provider,
   canSwitch,
   canDelete,
   disabled,
-  pending,
   onRequest,
-  onCancel,
-  onConfirm,
 }: {
   account: Account
-  provider: ProviderDescriptor
   canSwitch: boolean
   canDelete: boolean
   disabled: boolean
-  pending: PendingKind | null
   onRequest: (kind: PendingKind) => void
-  onCancel: () => void
-  onConfirm: () => void
 }) {
   const name = accountDisplayName(account)
 
-  if (pending === 'switch') {
-    return (
-      <Confirmation
-        label={`Confirm switch to ${name}`}
-        confirmLabel={`Confirm switch to ${name}`}
-        cancelLabel="Cancel switch"
-        disabled={disabled}
-        onCancel={onCancel}
-        onConfirm={onConfirm}
-      >
-        Switch {provider.displayName} to {name}? This replaces the credential
-        file in the tool&apos;s own home, behind a restorable backup.{' '}
-        {provider.displayName} must not be running.
-      </Confirmation>
-    )
-  }
-
-  if (pending === 'delete') {
-    return (
-      <Confirmation
-        label={`Confirm deletion of ${name}`}
-        confirmLabel={`Confirm deletion of ${name}`}
-        cancelLabel="Cancel deletion"
-        disabled={disabled}
-        onCancel={onCancel}
-        onConfirm={onConfirm}
-      >
-        Forget this application&apos;s stored copy of {name}?{' '}
-        {provider.displayName} is not signed out, and its own files are left
-        untouched.
-      </Confirmation>
-    )
+  if (!canSwitch && !canDelete) {
+    return null
   }
 
   return (
-    <div className="flex flex-wrap gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       {canSwitch && (
         <button
           type="button"
@@ -100,7 +62,13 @@ export default function AccountActions({
   )
 }
 
-function Confirmation({
+/**
+ * Inline confirm/cancel for a pending switch or delete. Rendered as a
+ * full-width row under the account it refers to so the sentence is not
+ * squeezed into the actions column.
+ */
+export function Confirmation({
+  id,
   label,
   confirmLabel,
   cancelLabel,
@@ -109,6 +77,7 @@ function Confirmation({
   onConfirm,
   children,
 }: {
+  id?: string
   label: string
   confirmLabel: string
   cancelLabel: string
@@ -128,9 +97,10 @@ function Confirmation({
 
   return (
     <div
+      id={id}
       role="group"
       aria-label={label}
-      className="max-w-md space-y-2"
+      className="space-y-2"
       onKeyDown={handleKeyDown}
     >
       <p id={textId} className="text-sm text-ink">
