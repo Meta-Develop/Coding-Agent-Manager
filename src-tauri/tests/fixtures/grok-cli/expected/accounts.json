@@ -6,6 +6,7 @@
     "maskedIdentity": "F***@example.invalid",
     "authKind": "oauth",
     "isActive": false,
+    "isStored": false,
     "expiresAt": "2027-01-01T00:00:00Z"
   },
   {
@@ -15,6 +16,7 @@
     "maskedIdentity": "F***@example.invalid",
     "authKind": "oauth",
     "isActive": false,
+    "isStored": false,
     "expiresAt": "2027-06-15T12:00:00Z"
   }
 ]

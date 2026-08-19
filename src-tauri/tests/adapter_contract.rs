@@ -364,6 +364,67 @@ fn advertised_capabilities_match_method_implementation() {
     }
 }
 
+/// `NFR-8`: `is_stored` must match whether `delete_account` can act on
+/// the listed row.
+///
+/// Capability is per provider; actionability is per row. An adapter that
+/// reports `is_stored: true` for a row whose `delete_account` returns
+/// `UnknownAccount` is lying the same way an advertised `NotImplemented`
+/// method is. Listed ids are already path-safe. `delete_account` on an
+/// unstored row returns `UnknownAccount` (or `NotImplemented`) without
+/// creating a directory, writing the live home, or spawning the vendor
+/// CLI. A stored row is deleted only under the injected TempDir:
+/// `with_home` isolates data under `{home}/.coding-agent-manager`. The
+/// suite never starts `codex`, never reaches the keychain, and never
+/// writes the real data directory or the real home (`docs/TESTING.md` §4).
+#[test]
+fn listed_is_stored_matches_delete_account() {
+    for id in registry_ids() {
+        let home = staged_home(id);
+        let adapter = adapter_for_home(id, home.path());
+        let before = tree_digest(home.path());
+        let accounts = match adapter.list_accounts() {
+            Ok(accounts) => accounts,
+            Err(Error::NotImplemented(_)) => continue,
+            Err(error) => {
+                panic!("`{id}` broke is_stored: list_accounts failed on its fixture: {error:?}")
+            }
+        };
+
+        for account in accounts.iter().filter(|account| !account.is_stored) {
+            let result = adapter.delete_account(&account.id);
+            let after = tree_digest(home.path());
+            assert_eq!(
+                before,
+                after,
+                "`{id}` broke is_stored: deleting unstored `{}` mutated \
+                 the home:\n{}",
+                account.id,
+                before.diff(&after)
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::UnknownAccount(_)) | Err(Error::NotImplemented(_))
+                ),
+                "`{id}` listed `{}` as not stored; delete_account returned \
+                 {result:?} instead of UnknownAccount or NotImplemented (NFR-8)",
+                account.id
+            );
+        }
+
+        for account in accounts.iter().filter(|account| account.is_stored) {
+            let result = adapter.delete_account(&account.id);
+            assert!(
+                !matches!(result, Err(Error::UnknownAccount(_))),
+                "`{id}` listed `{}` as stored; UnknownAccount would be a lie \
+                 (got {result:?})",
+                account.id
+            );
+        }
+    }
+}
+
 fn registry_ids() -> Vec<&'static str> {
     providers::registry()
         .iter()

@@ -73,6 +73,12 @@ pub struct Account {
     pub masked_identity: Option<String>,
     pub auth_kind: AuthKind,
     pub is_active: bool,
+    /// Whether this application holds a stored copy that
+    /// `activate_account` and `delete_account` can act on.
+    ///
+    /// This is not a validity, currency, or vendor-acceptance signal.
+    /// A stored copy may be expired, unused, or rejected by the vendor.
+    pub is_stored: bool,
     /// RFC 3339 timestamp, when the adapter can determine one.
     pub expires_at: Option<String>,
 }
@@ -239,6 +245,57 @@ mod tests {
                 "maturity": "experimental",
                 "installState": "installed",
                 "capabilities": ["add-account", "switch-account", "delete-account"]
+            })
+        );
+    }
+
+    #[test]
+    fn account_wire_shape_includes_is_stored() {
+        let stored = Account {
+            id: "acct-work".to_string(),
+            provider_id: "codex-cli".to_string(),
+            label: "work".to_string(),
+            masked_identity: Some("****0001".to_string()),
+            auth_kind: AuthKind::OAuth,
+            is_active: true,
+            is_stored: true,
+            expires_at: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&stored).unwrap(),
+            serde_json::json!({
+                "id": "acct-work",
+                "providerId": "codex-cli",
+                "label": "work",
+                "maskedIdentity": "****0001",
+                "authKind": "oauth",
+                "isActive": true,
+                "isStored": true,
+                "expiresAt": null
+            })
+        );
+
+        let live = Account {
+            id: "codex-cli-on-disk".to_string(),
+            provider_id: "codex-cli".to_string(),
+            label: "Codex CLI".to_string(),
+            masked_identity: Some("****0001".to_string()),
+            auth_kind: AuthKind::OAuth,
+            is_active: true,
+            is_stored: false,
+            expires_at: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&live).unwrap(),
+            serde_json::json!({
+                "id": "codex-cli-on-disk",
+                "providerId": "codex-cli",
+                "label": "Codex CLI",
+                "maskedIdentity": "****0001",
+                "authKind": "oauth",
+                "isActive": true,
+                "isStored": false,
+                "expiresAt": null
             })
         );
     }

@@ -6,6 +6,7 @@
     "maskedIdentity": "****0001",
     "authKind": "oauth",
     "isActive": true,
+    "isStored": false,
     "expiresAt": "2030-01-01T00:00:00Z"
   }
 ]

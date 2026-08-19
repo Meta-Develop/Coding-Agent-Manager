@@ -11,8 +11,9 @@ const confirmClass = `rounded-md border border-accent bg-accent/15 px-3 py-1.5 t
 export type PendingKind = 'switch' | 'delete'
 
 /**
- * Per-row switch and delete, gated by the adapter's capabilities. Confirm
- * and Cancel sit on the row rather than in a dialog so they stay in the tab
+ * Per-row switch and delete, gated by the adapter's capabilities and
+ * whether this application holds a stored copy of the row. Confirm and
+ * Cancel sit on the row rather than in a dialog so they stay in the tab
  * order without a focus trap (`NFR-6`).
  */
 export default function AccountActions({
