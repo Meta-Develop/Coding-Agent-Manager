@@ -1,21 +1,43 @@
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
+import AccountActions, {
+  accountDisplayName,
+  type PendingKind,
+} from '@/components/AccountActions'
+import AddAccountForm from '@/components/AddAccountForm'
 import NotImplemented from '@/components/NotImplemented'
 import PageHeader from '@/components/PageHeader'
-import { listAccounts, listProviders } from '@/lib/tauri'
-import type { Account, ProviderAccountList, ProviderDescriptor } from '@/types'
+import {
+  activateAccount,
+  addAccount,
+  deleteAccount,
+  listAccounts,
+  listProviders,
+} from '@/lib/tauri'
+import type {
+  Account,
+  ProviderAccountList,
+  ProviderCapability,
+  ProviderDescriptor,
+} from '@/types'
 
 /**
  * Lists accounts from every adapter, grouped by provider. Empty, unfinished,
- * failed, and API-key-only listings are distinct (`NFR-8`). Switching is not
- * offered (`FR-1`).
+ * failed, and API-key-only listings are distinct (`NFR-8`). Add, switch, and
+ * delete appear only when the adapter advertises the matching capability
+ * (`FR-1`, `NFR-8`).
  */
 export default function Accounts() {
   const [providers, setProviders] = useState<ProviderDescriptor[]>([])
   const [listings, setListings] = useState<ProviderAccountList[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState<Notice | null>(null)
+  const [pending, setPending] = useState<PendingConfirmation | null>(null)
+  const cancelledRef = useRef(false)
 
   useEffect(() => {
+    cancelledRef.current = false
     let cancelled = false
     Promise.all([listProviders(), listAccounts()])
       .then(([nextProviders, nextListings]) => {
@@ -33,14 +55,95 @@ export default function Accounts() {
       })
     return () => {
       cancelled = true
+      cancelledRef.current = true
     }
   }, [])
+
+  const cannotSwitch = providers.filter(
+    (provider) => !hasCapability(provider, 'switch-account'),
+  )
+
+  async function runMutation(
+    kind: PendingKind | 'add',
+    provider: ProviderDescriptor,
+    accountId: string,
+    accountName: string,
+  ): Promise<boolean> {
+    setPending(null)
+    setBusy(true)
+    setNotice({
+      tone: 'progress',
+      message: progressMessage(kind, provider, accountId, accountName),
+    })
+
+    try {
+      if (kind === 'add') {
+        await addAccount(provider.id, accountId)
+      } else if (kind === 'switch') {
+        await activateAccount(provider.id, accountId)
+      } else {
+        await deleteAccount(provider.id, accountId)
+      }
+    } catch (cause: unknown) {
+      if (cancelledRef.current) return false
+      setNotice({
+        tone: 'failure',
+        message: `${failureLead(kind, provider, accountId, accountName)} ${commandErrorMessage(cause)}`,
+      })
+      setBusy(false)
+      return false
+    }
+
+    if (cancelledRef.current) return true
+
+    try {
+      const [nextProviders, nextListings] = await Promise.all([
+        listProviders(),
+        listAccounts(),
+      ])
+      if (cancelledRef.current) return true
+      setProviders(nextProviders)
+      setListings(nextListings)
+      setNotice({
+        tone: 'success',
+        message: successMessage(kind, provider, accountId, accountName),
+      })
+    } catch (cause: unknown) {
+      if (cancelledRef.current) return true
+      setNotice({
+        tone: 'failure',
+        message: `${successMessage(kind, provider, accountId, accountName)} Reloading the list failed: ${commandErrorMessage(cause)}`,
+      })
+    } finally {
+      if (!cancelledRef.current) {
+        setBusy(false)
+      }
+    }
+
+    return true
+  }
+
+  function handleConfirmPending() {
+    if (pending === null) return
+    const provider = providers.find((item) => item.id === pending.providerId)
+    if (provider === undefined) {
+      setPending(null)
+      return
+    }
+    const listing = listingFor(listings, pending.providerId)
+    const account = listing?.accounts.find(
+      (item) => item.id === pending.accountId,
+    )
+    const accountName =
+      account === undefined ? pending.accountId : accountDisplayName(account)
+    void runMutation(pending.kind, provider, pending.accountId, accountName)
+  }
 
   return (
     <>
       <PageHeader
         title="Accounts"
-        description="Every account this application can see, grouped by provider. Listing is read-only."
+        description="Every account this application can see, grouped by provider. Add, switch, and delete appear only where an adapter implements them."
       />
       {loading && (
         <p className="text-sm text-ink-muted" role="status">
@@ -52,8 +155,17 @@ export default function Accounts() {
           Failed to load accounts: {error}
         </p>
       )}
+      {notice !== null && (
+        <p
+          key={notice.message}
+          role={notice.tone === 'failure' ? 'alert' : 'status'}
+          className={noticeClass(notice.tone)}
+        >
+          {notice.message}
+        </p>
+      )}
       {!loading && error === null && (
-        <div className="space-y-8">
+        <div className="space-y-8" aria-busy={busy}>
           {providers.length === 0 && (
             <p className="text-sm text-ink-muted">
               No providers were returned.
@@ -64,27 +176,73 @@ export default function Accounts() {
               key={provider.id}
               provider={provider}
               listing={listingFor(listings, provider.id)}
+              busy={busy}
+              pending={
+                pending !== null && pending.providerId === provider.id
+                  ? pending
+                  : null
+              }
+              onAdd={(accountId) =>
+                runMutation('add', provider, accountId, accountId)
+              }
+              onRequest={(accountId, kind) =>
+                setPending({
+                  providerId: provider.id,
+                  accountId,
+                  kind,
+                })
+              }
+              onCancelPending={() => setPending(null)}
+              onConfirmPending={handleConfirmPending}
             />
           ))}
-          <NotImplemented requirement="FR-1">
-            Switching the active account is not available yet. This page lists
-            what adapters can see; it does not change which account a tool will
-            use.
-          </NotImplemented>
+          {cannotSwitch.length > 0 && (
+            <NotImplemented requirement="FR-1">
+              {cannotSwitch.map((provider) => provider.displayName).join(', ')}{' '}
+              cannot switch accounts yet. This page lists what those adapters
+              can see; it does not change which account those tools will use.
+            </NotImplemented>
+          )}
         </div>
       )}
     </>
   )
 }
 
+interface PendingConfirmation {
+  providerId: string
+  accountId: string
+  kind: PendingKind
+}
+
+interface Notice {
+  tone: 'progress' | 'success' | 'failure'
+  message: string
+}
+
 function ProviderAccounts({
   provider,
   listing,
+  busy,
+  pending,
+  onAdd,
+  onRequest,
+  onCancelPending,
+  onConfirmPending,
 }: {
   provider: ProviderDescriptor
   listing: ProviderAccountList | undefined
+  busy: boolean
+  pending: PendingConfirmation | null
+  onAdd: (accountId: string) => Promise<boolean>
+  onRequest: (accountId: string, kind: PendingKind) => void
+  onCancelPending: () => void
+  onConfirmPending: () => void
 }) {
   const headingId = `accounts-heading-${provider.id}`
+  const canAdd = hasCapability(provider, 'add-account')
+  const canSwitch = hasCapability(provider, 'switch-account')
+  const canDelete = hasCapability(provider, 'delete-account')
 
   return (
     <section aria-labelledby={headingId}>
@@ -94,15 +252,48 @@ function ProviderAccounts({
       <p className="mt-1 text-xs text-ink-muted">
         {provider.vendor} · {provider.maturity}
       </p>
-      {listingBody(headingId, listing)}
+      {listingBody({
+        headingId,
+        listing,
+        provider,
+        busy,
+        pending,
+        canSwitch,
+        canDelete,
+        onRequest,
+        onCancelPending,
+        onConfirmPending,
+      })}
+      {canAdd && (
+        <AddAccountForm provider={provider} disabled={busy} onAdd={onAdd} />
+      )}
     </section>
   )
 }
 
-function listingBody(
-  headingId: string,
-  listing: ProviderAccountList | undefined,
-): ReactElement {
+function listingBody({
+  headingId,
+  listing,
+  provider,
+  busy,
+  pending,
+  canSwitch,
+  canDelete,
+  onRequest,
+  onCancelPending,
+  onConfirmPending,
+}: {
+  headingId: string
+  listing: ProviderAccountList | undefined
+  provider: ProviderDescriptor
+  busy: boolean
+  pending: PendingConfirmation | null
+  canSwitch: boolean
+  canDelete: boolean
+  onRequest: (accountId: string, kind: PendingKind) => void
+  onCancelPending: () => void
+  onConfirmPending: () => void
+}): ReactElement {
   if (listing === undefined) {
     return (
       <p className="mt-3 text-sm text-ink-muted">
@@ -110,6 +301,21 @@ function listingBody(
       </p>
     )
   }
+
+  const table = (accounts: Account[]) => (
+    <AccountTable
+      headingId={headingId}
+      accounts={accounts}
+      provider={provider}
+      busy={busy}
+      pending={pending}
+      canSwitch={canSwitch}
+      canDelete={canDelete}
+      onRequest={onRequest}
+      onCancelPending={onCancelPending}
+      onConfirmPending={onConfirmPending}
+    />
+  )
 
   switch (listing.outcome.kind) {
     case 'listed':
@@ -120,7 +326,7 @@ function listingBody(
           </p>
         )
       }
-      return <AccountTable headingId={headingId} accounts={listing.accounts} />
+      return table(listing.accounts)
     case 'listed-api-key-only':
       if (listing.accounts.length === 0) {
         return (
@@ -132,7 +338,7 @@ function listingBody(
       }
       return (
         <>
-          <AccountTable headingId={headingId} accounts={listing.accounts} />
+          {table(listing.accounts)}
           <LimitationNote>
             This adapter only sees GEMINI_API_KEY. It cannot see Google OAuth
             accounts.
@@ -167,12 +373,29 @@ function LimitationNote({ children }: { children: React.ReactNode }) {
 function AccountTable({
   headingId,
   accounts,
+  provider,
+  busy,
+  pending,
+  canSwitch,
+  canDelete,
+  onRequest,
+  onCancelPending,
+  onConfirmPending,
 }: {
   headingId: string
   accounts: Account[]
+  provider: ProviderDescriptor
+  busy: boolean
+  pending: PendingConfirmation | null
+  canSwitch: boolean
+  canDelete: boolean
+  onRequest: (accountId: string, kind: PendingKind) => void
+  onCancelPending: () => void
+  onConfirmPending: () => void
 }) {
   const unknownActiveId = `${headingId}-unknown-active`
   const activeKnown = accounts.some((account) => account.isActive)
+  const showActions = canSwitch || canDelete
 
   return (
     <>
@@ -201,9 +424,14 @@ function AccountTable({
               <th scope="col" className="py-2 pr-4">
                 Status
               </th>
-              <th scope="col" className="py-2">
+              <th scope="col" className={showActions ? 'py-2 pr-4' : 'py-2'}>
                 Expires
               </th>
+              {showActions && (
+                <th scope="col" className="py-2">
+                  Actions
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -219,9 +447,34 @@ function AccountTable({
                 <td className="py-2 pr-4 text-ink-muted">
                   {statusLabel(account, activeKnown)}
                 </td>
-                <td className="py-2 text-ink-muted">
+                <td
+                  className={
+                    showActions
+                      ? 'py-2 pr-4 text-ink-muted'
+                      : 'py-2 text-ink-muted'
+                  }
+                >
                   {presentOrAbsent(account.expiresAt, 'Not established')}
                 </td>
+                {showActions && (
+                  <td className="py-2">
+                    <AccountActions
+                      account={account}
+                      provider={provider}
+                      canSwitch={canSwitch}
+                      canDelete={canDelete}
+                      disabled={busy}
+                      pending={
+                        pending !== null && pending.accountId === account.id
+                          ? pending.kind
+                          : null
+                      }
+                      onRequest={(kind) => onRequest(account.id, kind)}
+                      onCancel={onCancelPending}
+                      onConfirm={onConfirmPending}
+                    />
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -258,4 +511,76 @@ function statusLabel(account: Account, activeKnown: boolean): string {
     return 'Not known'
   }
   return account.isActive ? 'Active' : '—'
+}
+
+function hasCapability(
+  provider: ProviderDescriptor,
+  capability: ProviderCapability,
+): boolean {
+  return provider.capabilities.includes(capability)
+}
+
+function noticeClass(tone: Notice['tone']): string {
+  if (tone === 'failure') {
+    return 'mb-4 rounded-md border border-border-subtle p-3 text-sm'
+  }
+  if (tone === 'progress') {
+    return 'mb-4 rounded-md border border-border-subtle bg-surface-raised p-3 text-sm'
+  }
+  return 'mb-4 text-sm text-ink-muted'
+}
+
+function progressMessage(
+  kind: PendingKind | 'add',
+  provider: ProviderDescriptor,
+  accountId: string,
+  accountName: string,
+): string {
+  if (kind === 'add') {
+    return `Adding ${accountId} to ${provider.displayName}. Sign-in is waiting in the terminal that launched this application; this window will update when it finishes.`
+  }
+  if (kind === 'switch') {
+    return `Switching ${provider.displayName} to ${accountName}…`
+  }
+  return `Deleting this application's stored copy of ${accountName}…`
+}
+
+function successMessage(
+  kind: PendingKind | 'add',
+  provider: ProviderDescriptor,
+  accountId: string,
+  accountName: string,
+): string {
+  if (kind === 'add') {
+    return `Added ${accountId} to ${provider.displayName}.`
+  }
+  if (kind === 'switch') {
+    return `Switched ${provider.displayName} to ${accountName}.`
+  }
+  return `Deleted this application's stored copy of ${accountName}.`
+}
+
+function failureLead(
+  kind: PendingKind | 'add',
+  provider: ProviderDescriptor,
+  accountId: string,
+  accountName: string,
+): string {
+  if (kind === 'add') {
+    return `Could not add ${accountId} to ${provider.displayName}:`
+  }
+  if (kind === 'switch') {
+    return `Could not switch ${provider.displayName} to ${accountName}:`
+  }
+  return `Could not delete ${accountName}:`
+}
+
+function commandErrorMessage(cause: unknown): string {
+  if (typeof cause === 'string' && cause.trim() !== '') {
+    return cause
+  }
+  if (cause instanceof Error && cause.message.trim() !== '') {
+    return cause.message
+  }
+  return 'The command failed without an error message.'
 }
