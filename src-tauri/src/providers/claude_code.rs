@@ -37,8 +37,11 @@
 //!   identity-shaped field whose key and location are in the recorded schema.
 //! - Nothing is taken from `~/.claude.json`. `oauthAccount` internals and
 //!   whether `userID` is the display identity are an open question (research
-//!   §9). `machineID` is machine-scoped. A present-but-unparsable identity
-//!   file is still `Error::ConfigRead`: we must not guess at its shape.
+//!   §9). `machineID` is machine-scoped. Listing therefore tolerates a
+//!   present-but-unparsable identity file the same way it tolerates a missing
+//!   one: the file is unused, so damage to it cannot hide a valid login. An
+//!   unparsable `.credentials.json` is still `Error::ConfigRead` — that file
+//!   is the account, and guessing at its shape is forbidden.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -241,12 +244,22 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         let credentials_path = home.join(".claude").join(".credentials.json");
         let identity_path = home.join(".claude.json");
 
-        // Both files are parsed whenever they exist. A missing credentials
-        // file means no account; a missing identity file means the account
-        // is listed without a `~/.claude.json` contribution. Either file
-        // present-and-unparsable is `ConfigRead`.
+        // `.credentials.json` is the account. Missing → no account.
+        // Present-and-unparsable → `ConfigRead`; guessing at that document
+        // is forbidden.
         let credentials = self.read_optional_object(&credentials_path)?;
-        let identity = self.read_optional_object(&identity_path)?;
+        // `~/.claude.json` is large, machine-scoped, and rewritten by the
+        // running client. This adapter copies no field from it (research §9:
+        // which key is the display identity is `[unknown]`). A truncated or
+        // mid-write copy of a file we do not read must not hide a valid login,
+        // so `ConfigRead` here is treated as unused — the same as missing.
+        // The two-file split stays visible at the call site; only the unused
+        // file is tolerated.
+        let identity = match self.read_optional_object(&identity_path) {
+            Ok(value) => value,
+            Err(Error::ConfigRead { .. }) => None,
+            Err(error) => return Err(error),
+        };
 
         let Some(credentials) = credentials else {
             return Ok(Vec::new());
@@ -454,28 +467,65 @@ mod tests {
     }
 
     #[test]
-    fn list_accounts_rejects_malformed_identity_file() {
-        // A present-but-unparsable `~/.claude.json` is ConfigRead even though
-        // no field is taken from it: we must not guess at the identity document.
-        let home = tempfile::tempdir().expect("tempdir");
+    fn list_accounts_rejects_malformed_credentials_even_with_identity() {
+        // The unused identity file being intact does not license guessing at
+        // the credentials document. Malformed bytes written here, not stored
+        // as a `.json` fixture (Prettier).
+        let home = staged_home("unparsable-credentials");
         write_credentials(
             home.path(),
-            r#"{"claudeAiOauth":{"expiresAt":1893456000000},"organizationUuid":"FAKE-organization-uuid-0001"}"#,
+            r#"{this is not json, "accessToken": "FAKE-malformed-token-0001""#,
         );
+        let adapter = ClaudeCodeAdapter::with_home(home.path());
+        let error = adapter
+            .list_accounts()
+            .expect_err("unparsable .credentials.json must not be guessed at");
+        assert!(
+            matches!(error, Error::ConfigRead { .. }),
+            "expected ConfigRead, got {error:?}"
+        );
+        assert_no_fake("credentials ConfigRead Display", &error.to_string());
+        assert_no_fake("credentials ConfigRead Debug", &format!("{error:?}"));
+    }
+
+    #[test]
+    fn list_accounts_lists_when_identity_file_is_unparsable() {
+        // Malformed bytes are written here, not stored as a `.json` fixture:
+        // Prettier parses tracked `*.json` and refuses this document.
+        let home = staged_home("unparsable-identity");
         write_identity(
             home.path(),
             r#"{this is not json, "userID": "FAKE-user-0001""#,
         );
         let adapter = ClaudeCodeAdapter::with_home(home.path());
-        let error = adapter
+        let accounts = adapter
             .list_accounts()
-            .expect_err("unparsable ~/.claude.json must not be guessed at");
-        assert!(
-            matches!(error, Error::ConfigRead { .. }),
-            "expected ConfigRead, got {error:?}"
+            .expect("unparsable ~/.claude.json must not hide a valid login");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, ON_DISK_ACCOUNT_ID);
+        assert_eq!(accounts[0].auth_kind, AuthKind::OAuth);
+        assert_eq!(accounts[0].masked_identity.as_deref(), Some("****0001"));
+        assert!(accounts[0].is_active);
+        assert_no_fake(
+            "unparsable-identity list_accounts json",
+            &serde_json::to_string(&accounts).expect("json"),
         );
-        assert_no_fake("identity ConfigRead Display", &error.to_string());
-        assert_no_fake("identity ConfigRead Debug", &format!("{error:?}"));
+    }
+
+    #[test]
+    fn list_accounts_unparsable_identity_only_returns_empty() {
+        // Leftover client state is not a login, even when that leftover is
+        // damaged. Written here rather than stored as a `.json` fixture.
+        let home = staged_home("missing-files");
+        write_identity(
+            home.path(),
+            r#"{this is not json, "userID": "FAKE-user-0001""#,
+        );
+        let adapter = ClaudeCodeAdapter::with_home(home.path());
+        let accounts = adapter
+            .list_accounts()
+            .expect("damaged leftover ~/.claude.json is still not an account");
+        assert!(accounts.is_empty());
     }
 
     #[test]
