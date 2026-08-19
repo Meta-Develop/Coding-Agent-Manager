@@ -1,0 +1,11 @@
+[
+  {
+    "id": "claude-code-on-disk",
+    "providerId": "claude-code",
+    "label": "Claude Code",
+    "maskedIdentity": "****0001",
+    "authKind": "oauth",
+    "isActive": true,
+    "expiresAt": "2030-01-01T00:00:00Z"
+  }
+]

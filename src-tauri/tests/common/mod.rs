@@ -1,7 +1,8 @@
-//! Shared helpers for the M1 exit-criteria suite.
+//! Shared helpers for the integration-test suites.
 //!
-//! Kept out of the test bodies so the tests can stay about the property they
-//! pin down, not about walking directories.
+//! Used by the M1 exit-criteria suite and the adapter contract suite. Kept
+//! out of the test bodies so the tests can stay about the property they pin
+//! down, not about walking directories.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -285,7 +286,12 @@ fn normalise(path: &Path) -> String {
         .join("/")
 }
 
-fn copy_tree(src: &Path, dst: &Path) {
+/// Recursively copy a directory tree of regular files.
+///
+/// The adapter contract suite stages fixture homes with this so no test
+/// resolves the real user home (`docs/TESTING.md` §4). Behaviour is
+/// unchanged from the M1 helper: special files are rejected, not followed.
+pub fn copy_tree(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap_or_else(|error| {
         panic!("create {}: {error}", dst.display());
     });

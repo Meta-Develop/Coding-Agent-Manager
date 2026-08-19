@@ -63,11 +63,11 @@ pub trait ProviderAdapter: Send + Sync {
 /// All adapters known to this build, in display order.
 pub fn registry() -> Vec<Box<dyn ProviderAdapter>> {
     vec![
-        Box::new(claude_code::ClaudeCodeAdapter),
-        Box::new(codex_cli::CodexCliAdapter),
-        Box::new(cursor::CursorAdapter),
-        Box::new(grok_cli::GrokCliAdapter),
-        Box::new(gemini_cli::GeminiCliAdapter),
+        Box::new(claude_code::ClaudeCodeAdapter::default()),
+        Box::new(codex_cli::CodexCliAdapter::default()),
+        Box::new(cursor::CursorAdapter::default()),
+        Box::new(grok_cli::GrokCliAdapter::default()),
+        Box::new(gemini_cli::GeminiCliAdapter::default()),
     ]
 }
 
