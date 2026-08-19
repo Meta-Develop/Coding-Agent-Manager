@@ -7,21 +7,23 @@ log out, log in, hope the tool did not cache the old identity, repeat for every
 other tool you use. Coding Agent Manager keeps every account for every agent in
 one place and makes switching a single click, with no re-authentication.
 
-> **Status: pre-alpha.** The application skeleton, the adapter contract, and the
-> full specification are in place. Claude Code, Codex CLI, Grok CLI, and Gemini
-> CLI can list accounts; switching is not implemented yet. See
+> **Status: pre-alpha.** The application skeleton, the adapter contract, and
+> the full specification are in place. Codex CLI can add a stored account,
+> switch the live `auth.json`, and delete a stored copy. That switch is a
+> local file replacement; it is not proven against the vendor. Claude Code,
+> Grok CLI, and Gemini CLI can list accounts; they cannot switch. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md) for what lands when, and
-> [`docs/PROVIDER_MATRIX.md`](docs/PROVIDER_MATRIX.md) for what is known about
-> each tool today.
+> [`docs/PROVIDER_MATRIX.md`](docs/PROVIDER_MATRIX.md) for what is known
+> about each tool today.
 
 ## Supported providers
 
 | Provider    | Vendor    | Auth           | Adapter status | Notes                                                                                                                                                                                                                          |
 | ----------- | --------- | -------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Claude Code | Anthropic | OAuth, API key | Experimental   | Lists the on-disk identity by reading `.credentials.json` and `~/.claude.json`; switching is not implemented                                                                                                                   |
-| Codex CLI   | OpenAI    | OAuth, API key | Experimental   | Lists the single `auth.json` identity; switching is not implemented                                                                                                                                                            |
+| Codex CLI   | OpenAI    | OAuth, API key | Experimental   | Adds a stored account via isolated `codex login`, lists the live identity plus stored copies, switches by replacing live `auth.json`, deletes a stored copy without signing out. The switch is not proven against the vendor.  |
 | Cursor      | Anysphere | Unknown        | Planned        | Credential location not yet established                                                                                                                                                                                        |
-| Grok CLI    | xAI       | OAuth, API key | Experimental   | Lists every identity in the multi-account `auth.json`; switching is not implemented                                                                                                                                            |
+| Grok CLI    | xAI       | OAuth, API key | Experimental   | Lists signed-in OIDC identities from `auth.json`, skips reserved scopes, honours `$GROK_HOME`. That file is not multi-account. Switching is not implemented.                                                                   |
 | Gemini CLI  | Google    | OAuth, API key | Experimental   | Lists an account when `GEMINI_API_KEY` is set; does not list OAuth accounts (reads only that variable, not the OAuth files vendor source now names); switching is not implemented, and an OAuth switch remains unimplementable |
 
 Antigravity, Windsurf, GitHub Copilot, OpenCode, Aider, and Cline are planned
@@ -30,22 +32,33 @@ code — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## What it does
 
-- **Multi-account management** per provider, with one-click switching.
-- **Credential handling**: OAuth 2.0 with PKCE, API keys, automatic refresh.
-- **Secure storage**: OS keychain first, encrypted file only as a fallback.
-- **Quota dashboard**: remaining quota, rate-limit windows, and reset times for
-  the providers that expose a usable signal.
-- **Local relay**: one endpoint that adapts between OpenAI, Anthropic, and
-  Gemini wire formats, so any tool can talk to any account.
-- **Smart routing**: model mapping and tiered routing by account type and
-  remaining quota, with failover on rate limits.
+Shipped today:
+
+- **Codex CLI accounts.** Add a stored account via the vendor's own
+  `codex login`, switch the live `auth.json` behind a restorable backup,
+  and delete a stored copy without signing the tool out. Other adapters
+  list only.
+- **Listing.** Claude Code, Codex CLI, Grok CLI, and Gemini CLI (API-key
+  path only) can list what they can see, with identities masked.
+- **Secure storage.** OS keychain first, encrypted file only as a
+  fallback, for secrets this application itself stores. Stored Codex
+  accounts are vendor-written files — see
+  [`docs/adr/0008-vendor-written-auth-json-for-stored-codex-accounts.md`](docs/adr/0008-vendor-written-auth-json-for-stored-codex-accounts.md).
+
+Specified for v1, not built yet:
+
+- In-app OAuth 2.0 with PKCE, API-key intake, and automatic refresh.
+- Quota dashboard.
+- Local relay between OpenAI, Anthropic, and Gemini wire formats.
+- Smart routing with failover on rate limits.
 
 The full requirement list, numbered and referenceable, is in
 [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Screenshots
 
-_Placeholder — screenshots will be added when the first adapter ships (M2)._
+_Placeholder — screenshots will be added once the Accounts page is
+stable enough to photograph._
 
 ## Quick start
 
