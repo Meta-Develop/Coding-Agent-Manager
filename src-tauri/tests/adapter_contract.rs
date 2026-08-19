@@ -307,6 +307,49 @@ fn activate_account_is_implemented_or_exactly_not_implemented() {
     }
 }
 
+/// `NFR-8`: an adapter that has grown `add_account` must not return
+/// `NotImplemented` from it, and one that has not must.
+///
+/// The probe id is not a safe path component, so a real implementation
+/// refuses before creating a directory or spawning the vendor CLI. The
+/// suite therefore never starts `codex`, never reaches the keychain, and
+/// never writes into the real data directory or the real home
+/// (`docs/TESTING.md` §4). `codex-cli` is the adapter that implements
+/// the method today; a later implementation must be added to the
+/// implemented set rather than quietly claiming the default stub.
+#[test]
+fn add_account_is_implemented_or_exactly_not_implemented() {
+    for id in registry_ids() {
+        let home = staged_home(id);
+        let adapter = adapter_for_home(id, home.path());
+        let before = tree_digest(home.path());
+        let result = adapter.add_account("../etc");
+        let after = tree_digest(home.path());
+        assert_eq!(
+            before,
+            after,
+            "`{id}` broke add_account: a path-escape id must not mutate \
+             the home:\n{}",
+            before.diff(&after)
+        );
+
+        let not_implemented = matches!(result, Err(Error::NotImplemented(_)));
+        if id == "codex-cli" {
+            assert!(
+                !not_implemented,
+                "`codex-cli` implements add_account; NotImplemented would \
+                 be a lie (got {result:?})"
+            );
+        } else {
+            assert!(
+                not_implemented,
+                "`{id}` has not implemented add_account; returning \
+                 {result:?} would overstate what the adapter can do (NFR-8)"
+            );
+        }
+    }
+}
+
 fn registry_ids() -> Vec<&'static str> {
     providers::registry()
         .iter()
