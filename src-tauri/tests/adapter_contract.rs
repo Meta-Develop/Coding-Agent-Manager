@@ -226,53 +226,16 @@ fn list_accounts_never_echoes_fixture_secret_material() {
     );
 }
 
-/// `activate_account` is the only mutating method (`docs/ARCHITECTURE.md`
-/// §4) and must take a restorable backup first (`NFR-4`).
+/// `activate_account` must not mutate the fixture home when the switch
+/// is refused or fails (`NFR-4`). The probe id is not a stored account,
+/// so every adapter either returns `NotImplemented` or refuses. Success
+/// would mean an unknown id was treated as a live switch.
 ///
-/// No adapter implements it yet. Switching mechanics are `[inferred]` or
-/// `[unknown]` in `docs/research/`, and no write path may depend on those
-/// markers (`docs/research/README.md`). What is true today: every adapter
-/// either implements the method or returns exactly `Error::NotImplemented`,
-/// and an unimplemented one writes nothing to the fixture home.
-///
-/// # NEXT WORKER — backup-ordering assertions (`docs/TESTING.md` §2, `NFR-4`)
-///
-/// When the first adapter returns anything other than
-/// `Error::NotImplemented` from `activate_account`, this test must gain
-/// the following assertions in the same change. Do not land the
-/// implementation with only the `NotImplemented` arm below still in
-/// force; the gap is how a write path ships without a restore check.
-///
-/// 1. **Backup before the first mutation.** Copy the adapter's fixture
-///    `home/` into a `TempDir` and inject it through `with_home`. Record
-///    `tree_digest` of that home. Call `activate_account` with an account
-///    id that `list_accounts` actually returned (a probe id would make
-///    the write path refuse and the check vacuous). After the call:
-///    - a restorable backup of every path in `config_paths()` must exist
-///      *before* any byte of the fixture home differs from the pre-call
-///      digest;
-///    - that backup must be visible to `BackupStore::list` and its
-///      `manifest.json` must already be on disk (the M1 suite in
-///      `m1_exit_criteria.rs` is the oracle for "the backup exists");
-///    - the backup root must itself be a `TempDir`. Adapters today have
-///      no injected backup root, so the implementation that first writes
-///      must accept one — otherwise the snapshot lands in the
-///      developer's real application-data directory, which this suite
-///      must never touch (`docs/TESTING.md` §4).
-///
-/// 2. **Forced mid-write failure leaves the fixture restorable.** After
-///    the backup exists, force a failure after the first managed write
-///    (the public API has no injection hook today; add one, or drive the
-///    same `BackupStore::snapshot` / `fsx::write_atomic` /
-///    `BackupStore::restore` sequence the adapter itself uses). Then
-///    `BackupStore::restore` must return the fixture home to a
-///    byte-identical `tree_digest`, including Unix permission bits and
-///    paths that did not exist before the switch. Reuse
-///    `common::tree_digest`; do not write a second oracle.
-///
-/// Do not implement either assertion against a guessed write path. Every
-/// claim about how a tool selects the active identity is still
-/// `[inferred]` or `[unknown]` in `docs/research/` as of this suite.
+/// Backup-before-the-first-write and restore-on-mid-write-failure are
+/// pinned in `codex_cli.rs` unit tests, which inject a backup root and
+/// a fault. This suite cannot: the trait has no backup-root or fault
+/// hook, and a snapshot must not land in the real data directory
+/// (`docs/TESTING.md` §4).
 #[test]
 fn activate_account_is_implemented_or_exactly_not_implemented() {
     for id in registry_ids() {
@@ -280,30 +243,21 @@ fn activate_account_is_implemented_or_exactly_not_implemented() {
         let adapter = adapter_for_home(id, home.path());
         let before = tree_digest(home.path());
 
-        match adapter.activate_account("contract-suite-probe") {
-            Err(Error::NotImplemented(_)) => {
-                let after = tree_digest(home.path());
-                assert_eq!(
-                    before,
-                    after,
-                    "`{id}` broke activate_account: returned NotImplemented \
-                     but mutated the home:\n{}",
-                    before.diff(&after)
-                );
-            }
-            other => {
-                // Implemented. The backup-ordering assertions in the
-                // NEXT WORKER comment above are not in force yet; name
-                // the adapter so the gap cannot be mistaken for a pass
-                // of NFR-4.
-                let _ = other;
-                eprintln!(
-                    "adapter_contract `{id}` implements activate_account; \
-                     NFR-4 backup-before-mutation and mid-write restore \
-                     are unproven (see NEXT WORKER comment)"
-                );
-            }
-        }
+        let result = adapter.activate_account("contract-suite-probe");
+        let after = tree_digest(home.path());
+        assert_eq!(
+            before,
+            after,
+            "`{id}` broke activate_account: a refused or failed switch \
+             must leave the home byte-identical (NFR-4):\n{}",
+            before.diff(&after)
+        );
+        assert!(
+            result.is_err(),
+            "`{id}` broke activate_account: probe id `contract-suite-probe` \
+             is not a stored account; success would mean an unknown id \
+             was treated as a live switch (got {result:?})"
+        );
     }
 }
 
