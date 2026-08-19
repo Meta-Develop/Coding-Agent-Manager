@@ -38,3 +38,67 @@ body {
     'Noto Sans JP',
     sans-serif;
 }
+
+/*
+ * One column system for every provider group on Accounts. Label, Identity,
+ * Auth, and Status keep the same track sizes whether Expires is present;
+ * Actions takes the leftover. min-width is what the 900px window scrolls
+ * inside the table container rather than crushing those tracks.
+ */
+.accounts-table {
+  table-layout: fixed;
+  width: 100%;
+  min-width: 46rem;
+  border-collapse: collapse;
+}
+
+.accounts-table.has-expires {
+  min-width: 54rem;
+}
+
+.accounts-table .col-label {
+  width: 12.5rem;
+}
+
+.accounts-table .col-identity {
+  width: 11rem;
+}
+
+.accounts-table .col-auth {
+  width: 6.5rem;
+}
+
+.accounts-table .col-status {
+  width: 9.5rem;
+}
+
+.accounts-table .col-expires {
+  width: 8.5rem;
+}
+
+.accounts-table th,
+.accounts-table td {
+  vertical-align: middle;
+}
+
+.accounts-table tbody tr.is-active {
+  background-color: var(--color-surface-raised);
+  box-shadow: inset 3px 0 0 var(--color-ink);
+}
+
+.accounts-table tbody th {
+  hyphens: none;
+  overflow: hidden;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
+  word-break: keep-all;
+  white-space: nowrap;
+}
+
+.fs-path {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  hyphens: none;
+}
