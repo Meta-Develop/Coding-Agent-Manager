@@ -436,9 +436,13 @@ impl ProviderAdapter for CodexCliAdapter {
     fn activate_account(&self, account_id: &str) -> Result<()> {
         // `docs/ARCHITECTURE.md` §5, in order. The document being written
         // is one the tool itself issued into a per-account directory; this
-        // application does not invent credential JSON. Treating an in-place
-        // replace in the user's default Codex home as a working vendor
-        // session remains [inferred] (`docs/research/codex-cli.md` §5).
+        // application does not invent credential JSON. Replacing auth.json
+        // in the resolved Codex home is the local identity switch
+        // `login status` follows: a 2026-08-19 probe on a full copy of a
+        // populated live home showed that file alone decides the reported
+        // identity [verified-local] (`docs/research/codex-cli.md` §5).
+        // Vendor acceptance of a moved credential is untested; `login
+        // status` is not a model request.
 
         // 1. Refuse if the tool is running. Error has no ToolRunning
         // variant; ConfigWrite is the closest existing one (we are
