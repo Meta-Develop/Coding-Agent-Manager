@@ -42,14 +42,20 @@
 //! - OpenAI `assistant.tool_calls` ↔ Anthropic `tool_use` content parts.
 //!   `function.arguments` (JSON string) ↔ `input` (JSON object).
 //! - OpenAI `tools[].function.parameters` ↔ Anthropic `tools[].input_schema`.
+//!   Omitted or JSON-null parameters map to `{}` (OpenAI's empty-object schema).
 //! - OpenAI `tool_choice` `"auto"` / `"required"` / `"none"` / `{function}` ↔
 //!   Anthropic `{type: auto|any|none|tool}`.
 //! - OpenAI `max_completion_tokens` → Anthropic `max_tokens` (same budget).
 //! - OpenAI `stop` (string or array) ↔ Anthropic `stop_sequences` (array).
-//! - OpenAI `user` ↔ Anthropic `metadata.user_id`.
+//! - OpenAI `user` ↔ Anthropic `metadata.user_id`. Empty `metadata` and
+//!   `user_id: null` mean no identity and are omitted.
 //! - OpenAI `n: 1` → omitted (Anthropic always returns one completion).
 //! - OpenAI `parallel_tool_calls: false` ↔ Anthropic
-//!   `tool_choice.disable_parallel_tool_use`.
+//!   `tool_choice.disable_parallel_tool_use` on `auto` / `any` / `tool`.
+//!   The `none` variant does not accept that key. Without tools the flag is
+//!   vacuous and is omitted rather than synthesizing a `tool_choice`.
+//! - Anthropic `tool_result.is_error: false` / `null` → omitted (the default).
+//!   `true` has no Chat Completions counterpart and is rejected.
 //! - OpenAI `image_url` ↔ Anthropic `image` (`url`, or a `data:` URL as
 //!   `base64`). `detail: "auto"` is the OpenAI default and is omitted;
 //!   `"low"` / `"high"` are rejected.
@@ -63,7 +69,8 @@
 //! `top_logprobs`, `top_k`, `thinking`, `reasoning`, `reasoning_effort`,
 //! `stream: true`, `service_tier`, `store`, OpenAI `metadata`, Anthropic
 //! `cache_control` / `container` / `mcp_servers`, `functions` /
-//! `function_call`, and a missing `max_tokens` when the target is Anthropic.
+//! `function_call`, Anthropic `tool_result.is_error: true`, and a missing
+//! `max_tokens` when the target is Anthropic.
 //!
 //! JSON `null` on a **known** field means unset. JSON `null` on an
 //! **unknown** key is still an unrecognised field and is rejected.
@@ -278,7 +285,11 @@ fn openai_chat_to_anthropic(body: &[u8]) -> Result<Vec<u8>> {
         ));
     }
 
-    let tool_choice = openai_tool_choice_to_anthropic(tool_choice, parallel_tool_calls)?;
+    let has_tools = tools
+        .as_ref()
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
+    let tool_choice = openai_tool_choice_to_anthropic(tool_choice, parallel_tool_calls, has_tools)?;
 
     let mut out = Map::new();
     out.insert("model".into(), Value::String(model));
@@ -369,7 +380,7 @@ fn anthropic_to_openai_chat(body: &[u8]) -> Result<Vec<u8>> {
                 }
                 stop = Some(value.clone());
             }
-            "metadata" => user = Some(anthropic_metadata_user(value)?),
+            "metadata" => user = anthropic_metadata_user(value)?,
             "stream" => refuse_stream(value)?,
             "top_k" | "thinking" | "service_tier" | "container" | "mcp_servers"
             | "context_management" | "output_config" | "output_format" | "cache_control" => {
@@ -1006,11 +1017,18 @@ fn convert_anthropic_tool_use(obj: &Map<String, Value>, path: &str) -> Result<Va
 
 fn convert_anthropic_tool_result(obj: &Map<String, Value>, path: &str) -> Result<Value> {
     refuse_unknown_keys(obj, &["type", "tool_use_id", "content", "is_error"], path)?;
-    if let Some(is_error) = obj.get("is_error") {
-        return Err(reject(
-            &format!("{path}.is_error"),
-            format!("no counterpart in openai-chat-completions (value {is_error})"),
-        ));
+    match obj.get("is_error") {
+        // Known-field JSON null = unset. false is Anthropic's default.
+        None | Some(Value::Null) | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => {
+            return Err(reject(
+                &format!("{path}.is_error"),
+                "no counterpart in openai-chat-completions",
+            ));
+        }
+        Some(_) => {
+            return Err(reject(&format!("{path}.is_error"), "must be a boolean"));
+        }
     }
     let id = expect_string(
         obj.get("tool_use_id")
@@ -1093,16 +1111,20 @@ fn convert_openai_tools(tools: &[Value]) -> Result<Value> {
             .ok_or_else(|| reject(&format!("{path}.function.name"), "field is required"))?
             .clone();
         expect_string(&name, &format!("{path}.function.name"))?;
-        let parameters = function
-            .get("parameters")
-            .ok_or_else(|| reject(&format!("{path}.function.parameters"), "field is required"))?
-            .clone();
-        if !parameters.is_object() {
-            return Err(reject(
-                &format!("{path}.function.parameters"),
-                "must be a JSON object",
-            ));
-        }
+        // OpenAI documents omitting `parameters` as an empty object schema
+        // (a zero-argument tool). JSON null is the known-field unset form.
+        let parameters = match function.get("parameters") {
+            None | Some(Value::Null) => json!({}),
+            Some(value) => {
+                if !value.is_object() {
+                    return Err(reject(
+                        &format!("{path}.function.parameters"),
+                        "must be a JSON object",
+                    ));
+                }
+                value.clone()
+            }
+        };
         let mut mapped = Map::new();
         mapped.insert("name".into(), name);
         if let Some(description) = function.get("description") {
@@ -1160,12 +1182,23 @@ fn convert_anthropic_tools(tools: &[Value]) -> Result<Value> {
 fn openai_tool_choice_to_anthropic(
     tool_choice: Option<&Value>,
     parallel_tool_calls: Option<&Value>,
+    has_tools: bool,
 ) -> Result<Option<Value>> {
     let disable_parallel = match parallel_tool_calls {
         None => false,
         Some(Value::Bool(value)) => !*value,
         Some(_) => return Err(reject("parallel_tool_calls", "must be a boolean")),
     };
+
+    // `parallel_tool_calls` only constrains concurrent tool use. With no tools
+    // and no `tool_choice`, the flag has nothing to apply to: OpenAI ignores
+    // it, and carrying it would require synthesizing `tool_choice`, which
+    // Anthropic 400s when `tools` is absent. The constraint is already
+    // satisfied, so the flag is vacuous — not a silent drop of a field that
+    // has a counterpart (`docs/ARCHITECTURE.md` §6).
+    if disable_parallel && !has_tools && tool_choice.is_none() {
+        return Ok(None);
+    }
 
     let mut mapped = match tool_choice {
         None => {
@@ -1215,7 +1248,12 @@ fn openai_tool_choice_to_anthropic(
 
     if disable_parallel {
         if let Some(obj) = mapped.as_object_mut() {
-            obj.insert("disable_parallel_tool_use".into(), Value::Bool(true));
+            // Anthropic accepts `disable_parallel_tool_use` only on auto / any
+            // / tool. `none` already forbids tool use, so the constraint is
+            // already in force and the key would 400.
+            if obj.get("type").and_then(Value::as_str) != Some("none") {
+                obj.insert("disable_parallel_tool_use".into(), Value::Bool(true));
+            }
         }
     }
     Ok(Some(mapped))
@@ -1379,12 +1417,19 @@ fn flush_user_parts(out: &mut Vec<Value>, parts: &mut Vec<Value>) {
     out.push(json!({ "role": "user", "content": content }));
 }
 
-fn anthropic_metadata_user(value: &Value) -> Result<String> {
+fn anthropic_metadata_user(value: &Value) -> Result<Option<String>> {
     let obj = expect_object(value, "metadata")?;
     let mut user = None;
     for (key, child) in obj {
         match key.as_str() {
-            "user_id" => user = Some(expect_string(child, "metadata.user_id")?.to_string()),
+            "user_id" => {
+                // Known-field JSON null = unset. An empty metadata object
+                // likewise carries no identity.
+                if child.is_null() {
+                    continue;
+                }
+                user = Some(expect_string(child, "metadata.user_id")?.to_string());
+            }
             other => {
                 return Err(reject(
                     &format!("metadata.{other}"),
@@ -1393,7 +1438,7 @@ fn anthropic_metadata_user(value: &Value) -> Result<String> {
             }
         }
     }
-    user.ok_or_else(|| reject("metadata.user_id", "field is required when metadata is set"))
+    Ok(user)
 }
 
 fn refuse_stream(value: &Value) -> Result<()> {
