@@ -46,9 +46,21 @@ export interface Account {
   /**
    * Whether this application holds a stored copy that activate and delete
    * can act on. Not a claim that the account is valid, current, or accepted
-   * by the vendor.
+   * by the vendor. An incomplete row is still stored: delete can remove
+   * the directory, but activate cannot use it.
    */
   isStored: boolean
+  /**
+   * True when this row is a managed directory that does not hold a usable
+   * vendor document (`auth.json` that is a JSON object).
+   *
+   * An incomplete row is an abandoned add, not someone's credentials. It
+   * is listed so the user can delete it rather than inferring that from a
+   * missing identity. It is never `isActive`. Completeness is structural:
+   * not a claim that a complete document is current or accepted by the
+   * vendor.
+   */
+  isIncomplete: boolean
   expiresAt: string | null
 }
 
@@ -66,6 +78,14 @@ export interface QuotaSnapshot {
 export type AccountListOutcome =
   | { kind: 'listed' }
   | { kind: 'listed-api-key-only' }
+  /**
+   * The adapter enumerated; `accounts` may be empty. Something is wrong
+   * that the user needs to see — typically a damaged live document —
+   * and is described by `error`. This is not a failed look: stored
+   * copies are still listed. The error never contains a credential
+   * value.
+   */
+  | { kind: 'listed-with-error'; error: AccountListError }
   | { kind: 'not-implemented' }
   | { kind: 'failed'; error: AccountListError }
 
