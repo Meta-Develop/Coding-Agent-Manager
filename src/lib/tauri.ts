@@ -24,8 +24,25 @@ export function listAccounts(
   })
 }
 
-export function activateAccount(accountId: string): Promise<void> {
-  return invoke<void>('activate_account', { accountId })
+export function addAccount(
+  providerId: string,
+  accountId: string,
+): Promise<void> {
+  return invoke<void>('add_account', { providerId, accountId })
+}
+
+export function activateAccount(
+  providerId: string,
+  accountId: string,
+): Promise<void> {
+  return invoke<void>('activate_account', { providerId, accountId })
+}
+
+export function deleteAccount(
+  providerId: string,
+  accountId: string,
+): Promise<void> {
+  return invoke<void>('delete_account', { providerId, accountId })
 }
 
 export function listQuota(): Promise<QuotaSnapshot[]> {
