@@ -23,9 +23,10 @@ pub mod grok_cli;
 
 /// The contract every managed tool must satisfy.
 ///
-/// Implementations must be side-effect free except in [`activate_account`],
-/// and [`activate_account`] must write a recoverable backup before it replaces
-/// any file the user's tool owns (NFR-4 in `docs/SPEC.md`).
+/// Implementations must be side-effect free except in [`activate_account`]
+/// and [`add_account`]. [`activate_account`] must write a recoverable backup
+/// before it replaces any file the user's tool owns (NFR-4 in `docs/SPEC.md`).
+/// [`add_account`] must not touch the live tool home.
 pub trait ProviderAdapter: Send + Sync {
     /// Stable identifier used in config, IPC, and on disk. Never renamed.
     fn id(&self) -> &'static str;
@@ -50,6 +51,22 @@ pub trait ProviderAdapter: Send + Sync {
     /// Must be atomic from the tool's point of view: either the switch fully
     /// happened or the previous state is intact.
     fn activate_account(&self, account_id: &str) -> Result<()>;
+
+    /// Create a stored account named `account_id`.
+    ///
+    /// May be long-running and interactive: an implementation may spawn the
+    /// vendor tool's own login so the user can complete a browser sign-in at
+    /// that tool's prompts. Stdio is inherited; this application does not
+    /// compose, parse, or log credential material.
+    ///
+    /// Must not mutate the live tool home. A failed attempt must not leave a
+    /// half-created account directory behind.
+    ///
+    /// The default returns [`Error::NotImplemented`] so an adapter that has
+    /// not grown this method cannot be mistaken for one that has (NFR-8).
+    fn add_account(&self, _account_id: &str) -> Result<()> {
+        Err(Error::NotImplemented("add_account"))
+    }
 
     /// Quota signals the provider exposes, if any.
     ///
