@@ -225,6 +225,7 @@ impl ProviderAdapter for GrokCliAdapter {
             // enforces the related rule.
             maturity: Maturity::Experimental,
             install_state: self.detect(),
+            capabilities: Vec::new(),
         }
     }
 

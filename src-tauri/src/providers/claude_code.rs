@@ -210,6 +210,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             // `Supported` would overstate that (NFR-8).
             maturity: Maturity::Experimental,
             install_state: self.detect(),
+            capabilities: Vec::new(),
         }
     }
 

@@ -26,7 +26,9 @@ use super::{
 use crate::backup::{BackupId, BackupStore};
 use crate::error::{Error, Result};
 use crate::fsx;
-use crate::model::{Account, AuthKind, InstallState, Maturity, ProviderDescriptor};
+use crate::model::{
+    Account, AuthKind, InstallState, Maturity, ProviderCapability, ProviderDescriptor,
+};
 use crate::paths;
 
 /// Application-assigned id for the single on-disk Codex identity.
@@ -647,6 +649,13 @@ impl ProviderAdapter for CodexCliAdapter {
             // would overstate what this adapter can do (NFR-8).
             maturity: Maturity::Experimental,
             install_state: self.detect(),
+            // Capabilities, not maturity, tell the Accounts page which
+            // buttons this adapter will honour (NFR-8).
+            capabilities: vec![
+                ProviderCapability::AddAccount,
+                ProviderCapability::SwitchAccount,
+                ProviderCapability::DeleteAccount,
+            ],
         }
     }
 
@@ -829,6 +838,103 @@ impl ProviderAdapter for CodexCliAdapter {
         }
         outcome
     }
+
+    fn delete_account(&self, account_id: &str) -> Result<()> {
+        // Only the per-account directory this application created is
+        // removed. The live Codex home is never consulted, so deleting
+        // the account that is currently active does not sign the user
+        // out of the tool.
+
+        if !account_id_is_safe(account_id) {
+            return Err(self.config_write(
+                "account id is not a safe path component; refusing to remove a managed directory",
+            ));
+        }
+        let Some(data_dir) = self.resolved_data_dir() else {
+            return Err(self.config_write(
+                "application data directory is unavailable; cannot delete a managed account",
+            ));
+        };
+        let dir = managed_account_dir(&data_dir, self.id(), account_id);
+        let accounts_root = data_dir.join("accounts").join(self.id());
+        // `account_id_is_safe` already rejects the empty and `.` forms
+        // that would collapse this path onto the provider tree. Keep the
+        // equality check so a future helper change cannot turn one
+        // delete into wiping every stored account.
+        if dir == accounts_root {
+            return Err(self.config_write(format!(
+                "refusing to remove the provider accounts tree {}",
+                accounts_root.display()
+            )));
+        }
+
+        let metadata = match fs::symlink_metadata(&dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Err(Error::UnknownAccount(account_id.to_string()));
+            }
+            Err(error) => {
+                return Err(self.config_write(format!("{} ({})", dir.display(), error.kind())));
+            }
+        };
+        // `symlink_metadata` does not follow links. A planted symlink is
+        // not a directory we created; following it would delete whatever
+        // it points at — the live home, another slot, or a path outside
+        // this tree.
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(self.config_write(format!(
+                "{} is not a managed account directory; refusing to remove it",
+                dir.display()
+            )));
+        }
+
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                if fs::symlink_metadata(&dir).is_ok() {
+                    return Err(self.config_write(format!(
+                        "could not fully remove {}; the path is still present",
+                        dir.display()
+                    )));
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let leftover = leftover_managed_path(&dir);
+                Err(self.config_write(format!(
+                    "could not fully remove {} ({}); credential material remains at {}",
+                    dir.display(),
+                    error.kind(),
+                    leftover.display()
+                )))
+            }
+        }
+    }
+}
+
+/// After a failed `remove_dir_all`, name a path that is still there so
+/// the user can remove leftover credential material by hand. Prefer a
+/// nested leftover over the directory itself. Never follows a leftover
+/// symlink (that would report a path outside the managed tree) and never
+/// reads file bytes (NFR-1).
+fn leftover_managed_path(dir: &Path) -> PathBuf {
+    let mut current = dir.to_path_buf();
+    for _ in 0..32 {
+        let Ok(mut entries) = fs::read_dir(&current) else {
+            return current;
+        };
+        let Some(Ok(entry)) = entries.next() else {
+            return current;
+        };
+        let child = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&child) else {
+            return child;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return child;
+        }
+        current = child;
+    }
+    current
 }
 
 #[cfg(test)]
@@ -1013,6 +1119,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let adapter = CodexCliAdapter::with_home(dir.path());
         assert_eq!(adapter.descriptor().maturity, Maturity::Experimental);
+        assert_eq!(
+            adapter.descriptor().capabilities,
+            vec![
+                ProviderCapability::AddAccount,
+                ProviderCapability::SwitchAccount,
+                ProviderCapability::DeleteAccount,
+            ]
+        );
         assert!(
             !matches!(
                 adapter.activate_account("codex-cli-on-disk"),
@@ -1935,6 +2049,208 @@ mod tests {
                 .iter()
                 .all(|account| account.id != ON_DISK_ACCOUNT_ID),
             "the live row is omitted once a managed copy matches"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    fn assert_delete_error_is_clean(error: &Error) {
+        assert_no_fake("delete_account Display", &error.to_string());
+        assert_no_fake("delete_account Debug", &format!("{error:?}"));
+    }
+
+    #[test]
+    fn delete_account_removes_the_directory_and_stops_listing_it() {
+        let env = AddEnv::new();
+        env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
+        env.seed_managed(SIBLING_ACCOUNT, &managed_oauth_bytes());
+        let before = env.digest();
+        let sibling =
+            fs::read(env.managed_dir(SIBLING_ACCOUNT).join("auth.json")).expect("sibling");
+
+        env.adapter(login_must_not_run)
+            .delete_account(ADDED_ACCOUNT)
+            .expect("delete");
+
+        assert!(
+            fs::symlink_metadata(env.managed_dir(ADDED_ACCOUNT)).is_err(),
+            "managed directory must be gone after delete"
+        );
+        assert_eq!(
+            fs::read(env.managed_dir(SIBLING_ACCOUNT).join("auth.json")).expect("sibling after"),
+            sibling,
+            "deleting one account must not touch a sibling"
+        );
+
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list after delete");
+        assert!(
+            accounts.iter().all(|account| account.id != ADDED_ACCOUNT),
+            "deleted account must stop being listed"
+        );
+        assert!(
+            accounts.iter().any(|account| account.id == SIBLING_ACCOUNT),
+            "sibling account must still be listed"
+        );
+        assert_eq!(
+            before,
+            env.digest(),
+            "delete_account must not touch the live Codex home; before={} after={}",
+            digest_brief(&before),
+            digest_brief(&env.digest())
+        );
+    }
+
+    #[test]
+    fn delete_account_rejects_an_unknown_id_without_changing_anything() {
+        let env = AddEnv::new();
+        env.seed_managed(SIBLING_ACCOUNT, &managed_oauth_bytes());
+        let before = env.digest();
+        let sibling =
+            fs::read(env.managed_dir(SIBLING_ACCOUNT).join("auth.json")).expect("sibling");
+
+        let error = env
+            .adapter(login_must_not_run)
+            .delete_account("no-such-account")
+            .expect_err("unknown account");
+        assert!(
+            matches!(error, Error::UnknownAccount(ref id) if id == "no-such-account"),
+            "expected UnknownAccount, got {error:?}"
+        );
+        assert_delete_error_is_clean(&error);
+        assert_eq!(
+            fs::read(env.managed_dir(SIBLING_ACCOUNT).join("auth.json")).expect("sibling after"),
+            sibling,
+            "an unknown id must not touch a sibling managed account"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn delete_account_rejects_an_unsafe_id_without_touching_anything() {
+        let env = AddEnv::new();
+        env.seed_managed(SIBLING_ACCOUNT, &managed_oauth_bytes());
+        let before = env.digest();
+        let sibling =
+            fs::read(env.managed_dir(SIBLING_ACCOUNT).join("auth.json")).expect("sibling");
+
+        for unsafe_id in ["../etc", "acct/work", ""] {
+            let error = env
+                .adapter(login_must_not_run)
+                .delete_account(unsafe_id)
+                .expect_err("unsafe id");
+            assert!(
+                matches!(error, Error::ConfigWrite { .. }),
+                "expected ConfigWrite for {unsafe_id:?}, got {error:?}"
+            );
+            assert!(
+                error.to_string().contains("not a safe path component"),
+                "user must be told the id is unsafe ({unsafe_id:?}): {error}"
+            );
+            assert_delete_error_is_clean(&error);
+        }
+
+        assert_eq!(
+            fs::read(env.managed_dir(SIBLING_ACCOUNT).join("auth.json")).expect("sibling after"),
+            sibling,
+            "an unsafe id must not touch a sibling managed account"
+        );
+        assert!(
+            !env.data.path().join("accounts/etc").exists(),
+            "../etc must not escape into a sibling of the provider tree"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn delete_account_does_not_sign_out_when_the_deleted_account_is_active() {
+        let env = AddEnv::new();
+        let live_auth = fs::read(env.live.path().join(".codex/auth.json")).expect("live auth");
+        env.seed_managed(TARGET_ACCOUNT, &live_auth);
+        let before = env.digest();
+
+        env.adapter(login_must_not_run)
+            .delete_account(TARGET_ACCOUNT)
+            .expect("delete active stored copy");
+
+        assert_eq!(
+            before,
+            env.digest(),
+            "deleting the active stored copy must not sign the tool out; before={} after={}",
+            digest_brief(&before),
+            digest_brief(&env.digest())
+        );
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list after delete");
+        assert!(
+            accounts.iter().all(|account| account.id != TARGET_ACCOUNT),
+            "deleted stored copy must stop being listed"
+        );
+        let live = accounts
+            .iter()
+            .find(|account| account.id == ON_DISK_ACCOUNT_ID)
+            .expect("live row must remain after its stored copy is forgotten");
+        assert!(
+            live.is_active,
+            "the live home still holds the identity; deleting the copy is not a sign-out"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_account_refuses_a_symlink_at_the_managed_path() {
+        let env = AddEnv::new();
+        let dir = env.managed_dir(ADDED_ACCOUNT);
+        fs::create_dir_all(dir.parent().expect("parent")).expect("provider tree");
+        // Point at the live home so following the link would destroy it.
+        std::os::unix::fs::symlink(env.live.path().join(".codex"), &dir).expect("symlink");
+        let before = env.digest();
+
+        let error = env
+            .adapter(login_must_not_run)
+            .delete_account(ADDED_ACCOUNT)
+            .expect_err("symlink");
+        assert!(
+            error
+                .to_string()
+                .contains("not a managed account directory"),
+            "a symlink is not a directory we created: {error}"
+        );
+        assert_delete_error_is_clean(&error);
+        let metadata = fs::symlink_metadata(&dir).expect("symlink remains");
+        assert!(
+            metadata.file_type().is_symlink(),
+            "refusing the slot must not remove a symlink we did not create"
+        );
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn delete_account_refuses_a_file_at_the_managed_path() {
+        let env = AddEnv::new();
+        let dir = env.managed_dir(ADDED_ACCOUNT);
+        fs::create_dir_all(dir.parent().expect("parent")).expect("provider tree");
+        fs::write(&dir, b"not a directory").expect("file at slot");
+        let before = env.digest();
+
+        let error = env
+            .adapter(login_must_not_run)
+            .delete_account(ADDED_ACCOUNT)
+            .expect_err("file at slot");
+        assert!(
+            error
+                .to_string()
+                .contains("not a managed account directory"),
+            "a file at the slot is not a directory we created: {error}"
+        );
+        assert_delete_error_is_clean(&error);
+        assert_eq!(
+            fs::read(&dir).expect("file after"),
+            b"not a directory",
+            "refusing the slot must not remove a file we did not create"
         );
         assert_eq!(before, env.digest());
     }
