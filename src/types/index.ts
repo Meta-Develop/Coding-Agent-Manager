@@ -43,6 +43,12 @@ export interface Account {
   maskedIdentity: string | null
   authKind: AuthKind
   isActive: boolean
+  /**
+   * Whether this application holds a stored copy that activate and delete
+   * can act on. Not a claim that the account is valid, current, or accepted
+   * by the vendor.
+   */
+  isStored: boolean
   expiresAt: string | null
 }
 

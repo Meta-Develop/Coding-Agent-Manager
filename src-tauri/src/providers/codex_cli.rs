@@ -443,6 +443,7 @@ impl CodexCliAdapter {
                 "Codex CLI",
                 object,
                 true,
+                false,
             )),
         ))
     }
@@ -514,6 +515,7 @@ impl CodexCliAdapter {
                 &account_id,
                 &object,
                 is_active,
+                true,
             ));
         }
         Ok(accounts)
@@ -592,14 +594,15 @@ fn mask_identity(raw: &str) -> Option<String> {
 /// - otherwise `AuthKind::Unknown`
 ///
 /// Token, key, and raw `account_id` values are never copied onto the `Account`.
-/// `id_token` is a JWT and is not decoded. `is_active` is supplied by the
-/// caller; this helper does not guess it.
+/// `id_token` is a JWT and is not decoded. `is_active` and `is_stored` are
+/// supplied by the caller; this helper does not guess them.
 fn account_from_auth(
     provider_id: &str,
     account_id: &str,
     label: &str,
     object: &serde_json::Map<String, serde_json::Value>,
     is_active: bool,
+    is_stored: bool,
 ) -> Account {
     let has_api_key = matches!(
         object.get("OPENAI_API_KEY"),
@@ -625,6 +628,7 @@ fn account_from_auth(
         masked_identity,
         auth_kind,
         is_active,
+        is_stored,
         // `last_refresh` is a refresh timestamp, not an expiry [verified-local].
         // Inventing `expires_at` from it would fabricate a capability the file
         // does not provide (NFR-8).
@@ -1902,6 +1906,35 @@ mod tests {
             .find(|account| account.id == ADDED_ACCOUNT)
             .expect("managed account");
         assert!(!managed.is_active);
+        assert_eq!(before, env.digest());
+    }
+
+    #[test]
+    fn list_accounts_marks_stored_copies_and_the_live_row() {
+        let env = AddEnv::new();
+        env.seed_managed(ADDED_ACCOUNT, &managed_oauth_bytes());
+        let before = env.digest();
+
+        let accounts = env
+            .adapter(login_must_not_run)
+            .list_accounts()
+            .expect("list");
+        let live = accounts
+            .iter()
+            .find(|account| account.id == ON_DISK_ACCOUNT_ID)
+            .expect("live row");
+        assert!(
+            !live.is_stored,
+            "the on-disk identity is not a stored copy this application can act on"
+        );
+        let managed = accounts
+            .iter()
+            .find(|account| account.id == ADDED_ACCOUNT)
+            .expect("managed account");
+        assert!(
+            managed.is_stored,
+            "a per-account directory this application created is stored"
+        );
         assert_eq!(before, env.digest());
     }
 

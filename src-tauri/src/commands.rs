@@ -175,6 +175,7 @@ mod tests {
             masked_identity: Some("****0001".to_string()),
             auth_kind: AuthKind::ApiKey,
             is_active: true,
+            is_stored: false,
             expires_at: None,
         }
     }
