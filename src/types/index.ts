@@ -46,3 +46,27 @@ export interface QuotaSnapshot {
   capturedAt: string
   source: 'local-file' | 'api' | 'header' | 'unknown'
 }
+
+/** How `list_accounts` finished for one provider. */
+export type AccountListOutcome =
+  | { kind: 'listed' }
+  | { kind: 'listed-api-key-only' }
+  | { kind: 'not-implemented' }
+  | { kind: 'failed'; error: AccountListError }
+
+export type AccountListErrorKind =
+  'config-read' | 'credential-store-unavailable' | 'other'
+
+/** Kind and, where safe, path of a failed look. Never a credential value. */
+export interface AccountListError {
+  kind: AccountListErrorKind
+  path: string | null
+  message: string
+}
+
+/** Per-provider result of `list_accounts`. */
+export interface ProviderAccountList {
+  providerId: ProviderId
+  accounts: Account[]
+  outcome: AccountListOutcome
+}
