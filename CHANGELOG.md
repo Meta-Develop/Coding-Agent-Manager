@@ -36,18 +36,42 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Encrypted-file fallback store: Argon2id key derivation from a user passphrase
   with its parameters recorded in the file, ChaCha20-Poly1305 authenticated
   encryption, a verifier that reports a wrong passphrase separately from a
-  tampered file, and a refusal to read or write a newer schema version. There is
-  still no plaintext mode, behind any flag (`FR-3`, `NFR-1`).
-- Read-only Codex CLI and Grok CLI adapters: Codex lists the accounts stored in
-  that tool's `auth.json`; Grok lists signed-in OIDC identities from that file
-  and skips reserved scopes. Switching is not implemented yet.
+  tampered file, and a refusal to read or write a newer schema version. Those
+  backends still have no plaintext mode, behind any flag (`FR-3`, `NFR-1`).
+- Codex CLI adapter: add a stored account by running the vendor's
+  `codex login` with `CODEX_HOME` pointed at a per-account directory under
+  the application data directory. The CLI writes `auth.json` itself. This
+  application never composes, parses, or stores credential material of
+  its own. Adding does not switch the live home.
+- Codex CLI `list_accounts` merges those stored copies with the live
+  on-disk identity. A stored account is marked active only when its
+  `auth.json` is byte-identical to the live file.
+- Codex CLI `activate_account` switches by replacing the live `auth.json`
+  behind a restorable backup, and refuses while a process named `codex`
+  is running. The write is a local file replacement. It is not proven
+  that the vendor accepts the copied credential
+  (`docs/research/codex-cli.md` §5).
+- Codex CLI `delete_account` forgets a stored copy without signing the
+  tool out.
+- `ProviderDescriptor.capabilities` so the UI offers only the mutating
+  operations an adapter implements (`NFR-8`). Maturity is not that gate.
+- Architecture decision record 0008: stored Codex accounts keep the
+  vendor-written `auth.json` on disk, a documented deviation from
+  `FR-3`.
+- Accounts page: add, switch, and delete, with confirmations, only where
+  the adapter advertises the matching capability and the row is a stored
+  copy. Sign-in still runs in the launching terminal.
+- Grok CLI adapter: list only signed-in OIDC identities, honour
+  `$GROK_HOME`, and treat the official CLI as present when `grok` is on
+  `PATH` or `auth.json` / `config.toml` exists, not merely because
+  `~/.grok` does. Switching is not implemented.
 - Read-only Claude Code adapter: lists the on-disk identity by reading
-  `.credentials.json` and `~/.claude.json`. Switching is not implemented yet.
-- Read-only Gemini CLI adapter: lists an account when `GEMINI_API_KEY` is set.
-  It does not list OAuth accounts: the adapter still reads only
+  `.credentials.json` and `~/.claude.json`. Switching is not implemented.
+- Read-only Gemini CLI adapter: lists an account when `GEMINI_API_KEY` is
+  set. It does not list OAuth accounts: the adapter still reads only
   `GEMINI_API_KEY`, not the OAuth files vendor source now names
-  (`~/.gemini/oauth_creds.json`, `~/.gemini/google_accounts.json`). Switching
-  is not implemented; an OAuth switch remains unimplementable.
+  (`~/.gemini/oauth_creds.json`, `~/.gemini/google_accounts.json`).
+  Switching is not implemented; an OAuth switch remains unimplementable.
 
 ### Changed
 
@@ -58,8 +82,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Notes
 
-The credential stores and the backup machinery are implemented and exercised by
-the M1 exit-criteria suite. Claude Code, Codex CLI, Grok CLI, and Gemini CLI
-can list accounts; switching is not implemented. See `docs/ROADMAP.md`.
+The credential stores and the backup machinery are implemented and exercised
+by the M1 exit-criteria suite. Codex CLI can add a stored account, switch
+the live `auth.json`, and delete a stored copy. That switch is a local
+file replacement; it is not proven against the vendor. Claude Code, Grok
+CLI, and Gemini CLI can list accounts; they cannot switch. See
+`docs/ROADMAP.md`.
 
 [Unreleased]: https://github.com/Meta-Develop/Coding-Agent-Manager/commits/main

@@ -21,12 +21,13 @@ contributor could reverse in an afternoon.
 
 ## Index
 
-| #                                                     | Title                                         | Status   |
-| ----------------------------------------------------- | --------------------------------------------- | -------- |
-| [0001](0001-tauri-v2-over-electron.md)                | Tauri v2 over Electron                        | Accepted |
-| [0002](0002-provider-adapter-plugin-architecture.md)  | Provider adapter architecture, compiled in    | Accepted |
-| [0003](0003-os-keychain-first-credential-storage.md)  | OS keychain first, encrypted file as fallback | Accepted |
-| [0004](0004-local-relay-protocol-translation.md)      | Local relay with protocol translation         | Accepted |
-| [0005](0005-gpl-3-0-license.md)                       | GPL-3.0-or-later                              | Accepted |
-| [0006](0006-clean-room-independent-implementation.md) | Clean-room independent implementation         | Accepted |
-| [0007](0007-reading-other-implementations.md)         | Reading other implementations                 | Accepted |
+| #                                                                  | Title                                              | Status   |
+| ------------------------------------------------------------------ | -------------------------------------------------- | -------- |
+| [0001](0001-tauri-v2-over-electron.md)                             | Tauri v2 over Electron                             | Accepted |
+| [0002](0002-provider-adapter-plugin-architecture.md)               | Provider adapter architecture, compiled in         | Accepted |
+| [0003](0003-os-keychain-first-credential-storage.md)               | OS keychain first, encrypted file as fallback      | Accepted |
+| [0004](0004-local-relay-protocol-translation.md)                   | Local relay with protocol translation              | Accepted |
+| [0005](0005-gpl-3-0-license.md)                                    | GPL-3.0-or-later                                   | Accepted |
+| [0006](0006-clean-room-independent-implementation.md)              | Clean-room independent implementation              | Accepted |
+| [0007](0007-reading-other-implementations.md)                      | Reading other implementations                      | Accepted |
+| [0008](0008-vendor-written-auth-json-for-stored-codex-accounts.md) | Vendor-written auth.json for stored Codex accounts | Proposed |

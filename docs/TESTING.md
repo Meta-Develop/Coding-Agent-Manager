@@ -20,14 +20,22 @@ The contract asserts:
 
 - `id()` is stable, kebab-case, and unique across the registry.
 - `descriptor().maturity` is not `supported` unless `list_accounts()` succeeds.
+- `descriptor().capabilities` matches whether `add_account`,
+  `activate_account`, and `delete_account` return `NotImplemented`
+  (`NFR-8`). The probe id is not a safe path component, so an
+  implementation refuses before creating a directory, writing the live
+  home, or spawning the vendor CLI.
 - `config_paths()` returns absolute paths and never panics when `$HOME` is
   unset or unusual.
 - `detect()` is side-effect free: running it twice leaves the fixture home byte
   for byte identical.
 - `list_accounts()` never returns a field containing a value that appears in the
   fixture's secret material. This is the automated form of `NFR-1`.
-- `activate_account()` on a fixture writes a backup before its first mutation,
-  and a forced mid-write failure leaves the fixture restorable (`NFR-4`).
+- `activate_account()` is implemented or returns exactly
+  `NotImplemented`. An unimplemented adapter writes nothing to the
+  fixture home. Backup-before-write and restore-on-failure (`NFR-4`) are
+  proven in the Codex CLI adapter unit tests, not yet in this shared
+  body.
 
 ## 3. Fixtures
 
@@ -76,9 +84,11 @@ dialect — which must produce an explicit error, never a silent drop.
 
 - Core, adapters, and translation: meaningful coverage of every branch that
   writes to disk or handles a secret. These are the paths where a bug costs a
-  user their login.
-- UI: type checking and lint. Component tests are not required while pages are
-  placeholders.
+  user their login. Codex CLI `add_account` is covered in that adapter's
+  unit tests (fresh directory, vendor-login failure cleanup, no live-home
+  mutation).
+- UI: type checking and lint. The Accounts page is no longer a
+  placeholder. Component tests are still not required.
 - A pull request adding a write path without a test for its failure-and-restore
   case does not get merged.
 

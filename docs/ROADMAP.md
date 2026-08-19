@@ -53,17 +53,36 @@ state is a single readable document.
 
 Satisfies: `FR-1`, `FR-2`, `FR-4`.
 
-- Codex CLI: read, list, switch by `auth.json` replacement, plus the
-  `CODEX_HOME` strategy where the launch path is controlled.
-- Grok CLI: read, list signed-in OIDC identities, switch by relocating
-  `$GROK_HOME` per account, honouring `auth.json.lock` and refusing while a
-  session is active.
-- Accounts page: import, label, list, switch, with switch verification.
-- Adapter contract test suite, running over both.
+M2 is not complete. Grok switching is not implemented, and the Codex
+switch is not proven against the vendor.
+
+Done:
+
+- Codex CLI: read, list, add via isolated `codex login` (`CODEX_HOME` at
+  a per-account directory), switch by replacing the live `auth.json`
+  behind a restorable backup, delete a stored copy without signing out.
+  Maturity remains `experimental`. The adapter does not switch by
+  relocating `CODEX_HOME` at launch, and it does not claim the vendor
+  accepts a copied credential.
+- Grok CLI: read, list signed-in OIDC identities, honour `$GROK_HOME`,
+  detect the official CLI. Switch by relocating `$GROK_HOME` is not
+  implemented.
+- Accounts page: add, list, switch, and delete, gated on
+  `ProviderDescriptor.capabilities`, with confirmations. There is no
+  separate import or label editor. Switch verification is a re-read of
+  the written `auth.json`, not a probe of the tool or the vendor.
+- Adapter contract suite over the registry, including a capability
+  guard.
+
+Still open:
+
+- Grok CLI: switch by relocating `$GROK_HOME` per account, honouring
+  `auth.json.lock` and refusing while a session is active.
 
 **Exit criteria.** A real switch on a real machine, verified by the tool
 reporting the expected identity, with a working restore. Both adapters at
-`experimental`.
+`experimental`. Neither is met: Grok cannot switch, and the Codex switch
+has not been verified by the tool against the vendor.
 
 ---
 
