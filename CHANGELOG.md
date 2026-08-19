@@ -38,8 +38,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   encryption, a verifier that reports a wrong passphrase separately from a
   tampered file, and a refusal to read or write a newer schema version. There is
   still no plaintext mode, behind any flag (`FR-3`, `NFR-1`).
-- Read-only Codex CLI and Grok CLI adapters: each lists the accounts stored in
-  that tool's `auth.json`. Switching is not implemented yet.
+- Read-only Codex CLI and Grok CLI adapters: Codex lists the accounts stored in
+  that tool's `auth.json`; Grok lists signed-in OIDC identities from that file
+  and skips reserved scopes. Switching is not implemented yet.
 - Read-only Claude Code adapter: lists the on-disk identity by reading
   `.credentials.json` and `~/.claude.json`. Switching is not implemented yet.
 - Read-only Gemini CLI adapter: lists an account when `GEMINI_API_KEY` is set.
