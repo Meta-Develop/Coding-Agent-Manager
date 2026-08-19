@@ -109,9 +109,13 @@ describe('Accounts page', () => {
     expect(
       within(incompleteRow).getByText('No usable credential'),
     ).toBeInTheDocument()
-    expect(
-      within(incompleteRow).getByText('Incomplete — sign-in never finished'),
-    ).toBeInTheDocument()
+    // Visible status is the one-word label so the cell stays on one line;
+    // the full explanation is on title (and identity already says the
+    // credential is unusable).
+    const incompleteStatus = within(incompleteRow).getByTitle(
+      'Incomplete — sign-in never finished',
+    )
+    expect(incompleteStatus).toHaveTextContent(/^Incomplete$/)
   })
 
   it('renders the table and the damaged-file error for listed-with-error', async () => {

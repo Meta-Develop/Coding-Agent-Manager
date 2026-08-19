@@ -4,7 +4,7 @@ import type { Account } from '@/types'
 const controlFocus =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
-const buttonClass = `whitespace-nowrap rounded-md border border-border-subtle px-3 py-1.5 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
+const buttonClass = `shrink-0 whitespace-nowrap rounded-md border border-border-subtle px-3 py-1.5 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
 
 const confirmClass = `whitespace-nowrap rounded-md border border-accent bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
 
@@ -37,7 +37,7 @@ export default function AccountActions({
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex w-max flex-nowrap items-center gap-2">
       {canSwitch && (
         <button
           type="button"
