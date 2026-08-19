@@ -8,21 +8,21 @@ other tool you use. Coding Agent Manager keeps every account for every agent in
 one place and makes switching a single click, with no re-authentication.
 
 > **Status: pre-alpha.** The application skeleton, the adapter contract, and the
-> full specification are in place. Codex CLI and Grok CLI can list accounts;
-> switching is not implemented yet. See
+> full specification are in place. Claude Code, Codex CLI, Grok CLI, and Gemini
+> CLI can list accounts; switching is not implemented yet. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md) for what lands when, and
 > [`docs/PROVIDER_MATRIX.md`](docs/PROVIDER_MATRIX.md) for what is known about
 > each tool today.
 
 ## Supported providers
 
-| Provider    | Vendor    | Auth           | Adapter status | Notes                                                                               |
-| ----------- | --------- | -------------- | -------------- | ----------------------------------------------------------------------------------- |
-| Claude Code | Anthropic | OAuth, API key | Planned        | Credentials and client state live in two separate files                             |
-| Codex CLI   | OpenAI    | OAuth, API key | Experimental   | Lists the single `auth.json` identity; switching is not implemented                 |
-| Cursor      | Anysphere | Unknown        | Planned        | Credential location not yet established                                             |
-| Grok CLI    | xAI       | OAuth, API key | Experimental   | Lists every identity in the multi-account `auth.json`; switching is not implemented |
-| Gemini CLI  | Google    | OAuth, API key | Planned        | `GEMINI_API_KEY` gives a file-free switching path                                   |
+| Provider    | Vendor    | Auth           | Adapter status | Notes                                                                                                                                                                                                                          |
+| ----------- | --------- | -------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude Code | Anthropic | OAuth, API key | Experimental   | Lists the on-disk identity by reading `.credentials.json` and `~/.claude.json`; switching is not implemented                                                                                                                   |
+| Codex CLI   | OpenAI    | OAuth, API key | Experimental   | Lists the single `auth.json` identity; switching is not implemented                                                                                                                                                            |
+| Cursor      | Anysphere | Unknown        | Planned        | Credential location not yet established                                                                                                                                                                                        |
+| Grok CLI    | xAI       | OAuth, API key | Experimental   | Lists every identity in the multi-account `auth.json`; switching is not implemented                                                                                                                                            |
+| Gemini CLI  | Google    | OAuth, API key | Experimental   | Lists an account when `GEMINI_API_KEY` is set; does not list OAuth accounts (reads only that variable, not the OAuth files vendor source now names); switching is not implemented, and an OAuth switch remains unimplementable |
 
 Antigravity, Windsurf, GitHub Copilot, OpenCode, Aider, and Cline are planned
 behind the same adapter interface. Adding one does not require changing core

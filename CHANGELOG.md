@@ -40,6 +40,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   still no plaintext mode, behind any flag (`FR-3`, `NFR-1`).
 - Read-only Codex CLI and Grok CLI adapters: each lists the accounts stored in
   that tool's `auth.json`. Switching is not implemented yet.
+- Read-only Claude Code adapter: lists the on-disk identity by reading
+  `.credentials.json` and `~/.claude.json`. Switching is not implemented yet.
+- Read-only Gemini CLI adapter: lists an account when `GEMINI_API_KEY` is set.
+  It does not list OAuth accounts: the adapter still reads only
+  `GEMINI_API_KEY`, not the OAuth files vendor source now names
+  (`~/.gemini/oauth_creds.json`, `~/.gemini/google_accounts.json`). Switching
+  is not implemented; an OAuth switch remains unimplementable.
 
 ### Changed
 
@@ -51,7 +58,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Notes
 
 The credential stores and the backup machinery are implemented and exercised by
-the M1 exit-criteria suite. Codex CLI and Grok CLI can list accounts; they
-cannot switch them. See `docs/ROADMAP.md`.
+the M1 exit-criteria suite. Claude Code, Codex CLI, Grok CLI, and Gemini CLI
+can list accounts; switching is not implemented. See `docs/ROADMAP.md`.
 
 [Unreleased]: https://github.com/Meta-Develop/Coding-Agent-Manager/commits/main
