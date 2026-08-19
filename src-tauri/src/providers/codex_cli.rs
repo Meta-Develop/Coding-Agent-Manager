@@ -16,11 +16,17 @@
 
 use std::fs;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use super::{binary_on_path, home_dir, ProviderAdapter};
+use super::{
+    account_id_is_safe, binary_on_path, home_dir, managed_account_dir, process_named_is_running,
+    ProviderAdapter,
+};
+use crate::backup::{BackupId, BackupStore};
 use crate::error::{Error, Result};
+use crate::fsx;
 use crate::model::{Account, AuthKind, InstallState, Maturity, ProviderDescriptor};
+use crate::paths;
 
 /// Application-assigned id for the single on-disk Codex identity.
 ///
@@ -36,6 +42,34 @@ pub struct CodexCliAdapter {
     /// what production uses; tests pass a `tempfile::TempDir` path so no
     /// test can read a developer's real credentials (`docs/TESTING.md` §4).
     home: Option<PathBuf>,
+    /// Injected application data directory (per-account homes and backups).
+    /// `None` in production means `paths::project_dirs`; tests pass a
+    /// `TempDir` so a switch never writes into the developer's real
+    /// application-data directory (`docs/TESTING.md` §4).
+    data_dir: Option<PathBuf>,
+    /// Override for the running-tool check.
+    ///
+    /// `None` means inspect the host process table, except when `home` is
+    /// injected — a fixture home is not the host's Codex, so the host
+    /// process table is ignored. `Some(Ok(b))` forces the answer.
+    /// `Some(Err(()))` forces the cannot-tell path, which must refuse.
+    injected_tool_running: Option<std::result::Result<bool, ()>>,
+    #[cfg(test)]
+    fault: SwitchFault,
+}
+
+/// Test-only injection that fires during `activate_account`.
+///
+/// Production builds do not carry this field. The public API has no fault
+/// hook; unit tests use it to pin backup-before-write and restore-on-failure
+/// (`docs/TESTING.md` §2, `NFR-4`).
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SwitchFault {
+    #[default]
+    None,
+    AfterSnapshot,
+    AfterWrite,
 }
 
 impl CodexCliAdapter {
@@ -43,7 +77,41 @@ impl CodexCliAdapter {
     pub fn with_home(home: impl Into<PathBuf>) -> Self {
         Self {
             home: Some(home.into()),
+            ..Self::default()
         }
+    }
+
+    /// Root per-account homes and backups at `data_dir`.
+    ///
+    /// Production leaves this unset and uses `paths::project_dirs`. Tests
+    /// pass a `TempDir` so the snapshot never lands in the developer's
+    /// real application-data directory.
+    pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(data_dir.into());
+        self
+    }
+
+    /// Override the running-tool check.
+    ///
+    /// Detecting Codex by process name is approximate (see
+    /// [`Self::tool_is_running`]). Tests force the answer so the host's
+    /// `codex app-server` cannot make a fixture switch refuse, and so the
+    /// refusal path can be exercised without spawning a real Codex.
+    pub fn with_tool_running(mut self, running: bool) -> Self {
+        self.injected_tool_running = Some(Ok(running));
+        self
+    }
+
+    #[cfg(test)]
+    fn with_tool_undetermined(mut self) -> Self {
+        self.injected_tool_running = Some(Err(()));
+        self
+    }
+
+    #[cfg(test)]
+    fn with_fault(mut self, fault: SwitchFault) -> Self {
+        self.fault = fault;
+        self
     }
 
     fn resolved_home(&self) -> Option<PathBuf> {
@@ -71,6 +139,173 @@ impl CodexCliAdapter {
         Error::ConfigRead {
             provider: self.id().to_string(),
             reason: reason.into(),
+        }
+    }
+
+    fn config_write(&self, reason: impl Into<String>) -> Error {
+        Error::ConfigWrite {
+            provider: self.id().to_string(),
+            reason: reason.into(),
+        }
+    }
+
+    /// Application data directory: injected, else isolated under an
+    /// injected home, else `paths::project_dirs`.
+    ///
+    /// The identity triple is spelled only in `paths::project_dirs`. An
+    /// injected home without an injected data dir falls back to
+    /// `{home}/.coding-agent-manager` so `with_home` (used by the contract
+    /// suite) cannot write into the developer's real data directory.
+    fn resolved_data_dir(&self) -> Option<PathBuf> {
+        if let Some(dir) = &self.data_dir {
+            return Some(dir.clone());
+        }
+        if let Some(home) = &self.home {
+            return Some(home.join(".coding-agent-manager"));
+        }
+        paths::project_dirs().map(|dirs| dirs.data_dir().to_path_buf())
+    }
+
+    fn backup_store(&self) -> Result<BackupStore> {
+        let Some(data_dir) = self.resolved_data_dir() else {
+            return Err(
+                self.config_write("application data directory is unavailable; no backup root")
+            );
+        };
+        Ok(BackupStore::new(data_dir.join("backups")))
+    }
+
+    fn account_auth_path(&self, account_id: &str) -> Result<PathBuf> {
+        if !account_id_is_safe(account_id) {
+            return Err(Error::UnknownAccount(account_id.to_string()));
+        }
+        let Some(data_dir) = self.resolved_data_dir() else {
+            return Err(self.config_write(
+                "application data directory is unavailable; cannot locate the account",
+            ));
+        };
+        Ok(managed_account_dir(&data_dir, self.id(), account_id).join("auth.json"))
+    }
+
+    /// Whether Codex appears to be running.
+    ///
+    /// Detecting by process name is inherently approximate: a renamed
+    /// binary is missed; an unrelated program named `codex` is a false
+    /// hit; a pid we cannot inspect is skipped. The check is conservative
+    /// about *writes*: when the process table cannot be read, this
+    /// returns `Err` and the caller refuses rather than replace
+    /// `auth.json` under a possibly-live process (`NFR-4`,
+    /// `docs/ARCHITECTURE.md` §8). On this host a VS Code extension
+    /// keeps `codex app-server` alive continuously, so "the tool is
+    /// running" is the normal state.
+    ///
+    /// An injected home is a fixture, not the host's Codex: the host
+    /// process table is ignored unless `with_tool_running` set an
+    /// override. Integration tests compile this crate without
+    /// `cfg(test)`, so that skip cannot live only behind `cfg(test)`.
+    fn tool_is_running(&self) -> Result<bool> {
+        match self.injected_tool_running {
+            Some(Ok(running)) => return Ok(running),
+            Some(Err(())) => {
+                return Err(Error::Io(std::io::Error::other(
+                    "cannot inspect the process table",
+                )));
+            }
+            None => {}
+        }
+        if self.home.is_some() {
+            return Ok(false);
+        }
+        process_named_is_running("codex")
+    }
+
+    /// Load the vendor-issued document for `account_id` without inspecting
+    /// secret fields. Structure only: the file exists, is a regular file,
+    /// and is a JSON object. Bytes are returned so the switch can write
+    /// them through `fsx::write_atomic` without parsing tokens.
+    fn load_account_auth(&self, account_id: &str) -> Result<(PathBuf, Vec<u8>)> {
+        let path = self.account_auth_path(account_id)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Err(Error::UnknownAccount(account_id.to_string()));
+            }
+            Err(error) => {
+                return Err(self.config_read(format!("{} ({})", path.display(), error.kind())));
+            }
+        };
+        if !metadata.is_file() {
+            return Err(self.config_read(format!("{} is not a regular file", path.display())));
+        }
+        let bytes = fs::read(&path)
+            .map_err(|error| self.config_read(format!("{} ({})", path.display(), error.kind())))?;
+        // serde's error text can echo a token; never include it (NFR-1).
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| self.config_read(format!("{} is not valid JSON", path.display())))?;
+        if !value.is_object() {
+            return Err(self.config_read(format!("{} is not a JSON object", path.display())));
+        }
+        Ok((path, bytes))
+    }
+
+    /// Confirm the live `auth.json` is the document we just wrote.
+    ///
+    /// What this proves: the live home now holds the same bytes as the
+    /// per-account file, they form a JSON object, and a reader of that
+    /// path sees the whole new document (`fsx::write_atomic`).
+    ///
+    /// What this does not prove: that `codex login status` would report
+    /// the expected identity; that the copied credential still works
+    /// against the vendor; that a long-running Codex process will pick
+    /// the file up; that the server-side session remains valid. The
+    /// 2026-08-19 probe established only that `auth.json` determines
+    /// local `login status` for a given `CODEX_HOME` [verified-local],
+    /// and explicitly not vendor acceptance (`docs/research/codex-cli.md`
+    /// §5). Invoking `codex login status` would add a subprocess and
+    /// still only report what the CLI believes. No stronger check is
+    /// possible without a network call, which a local switch must not
+    /// require (`NFR-3`). Step 4 is therefore this file-level check,
+    /// not a CLI invocation.
+    fn verify_live_auth(&self, dest: &Path, expected: &[u8]) -> Result<()> {
+        let got = fs::read(dest).map_err(|error| {
+            self.config_write(format!(
+                "could not re-read {} after write ({})",
+                dest.display(),
+                error.kind()
+            ))
+        })?;
+        if got.as_slice() != expected {
+            return Err(self.config_write(format!(
+                "{} did not match the account document after write",
+                dest.display()
+            )));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&got).map_err(|_| {
+            self.config_write(format!("{} is not valid JSON after write", dest.display()))
+        })?;
+        if !value.is_object() {
+            return Err(self.config_write(format!(
+                "{} is not a JSON object after write",
+                dest.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Restore `backup` and return a write error that says the previous
+    /// account is still active. Never includes file contents (NFR-1).
+    fn abort_switch(
+        &self,
+        store: &BackupStore,
+        backup: &BackupId,
+        reason: impl Into<String>,
+    ) -> Error {
+        let reason = reason.into();
+        match store.restore(backup) {
+            Ok(()) => self.config_write(format!("{reason}; the previous account is still active")),
+            Err(restore_error) => self.config_write(format!(
+                "{reason}; restore of the previous account also failed: {restore_error}"
+            )),
         }
     }
 }
@@ -151,8 +386,10 @@ impl ProviderAdapter for CodexCliAdapter {
             display_name: "Codex CLI".to_string(),
             vendor: "OpenAI".to_string(),
             auth_kinds: vec![AuthKind::OAuth, AuthKind::ApiKey],
-            // Read-only listing works; switching is still NotImplemented.
-            // `Supported` would overstate that (NFR-8).
+            // Switching writes a vendor-issued `auth.json` into the live
+            // home. That does not prove the copied credential works against
+            // the vendor (`docs/research/codex-cli.md` §5), so `Supported`
+            // would overstate what this adapter can do (NFR-8).
             maturity: Maturity::Experimental,
             install_state: self.detect(),
         }
@@ -196,8 +433,86 @@ impl ProviderAdapter for CodexCliAdapter {
         Ok(vec![account_from_auth(self.id(), object)])
     }
 
-    fn activate_account(&self, _account_id: &str) -> Result<()> {
-        Err(Error::NotImplemented("codex-cli::activate_account"))
+    fn activate_account(&self, account_id: &str) -> Result<()> {
+        // `docs/ARCHITECTURE.md` §5, in order. The document being written
+        // is one the tool itself issued into a per-account directory; this
+        // application does not invent credential JSON. Treating an in-place
+        // replace in the user's default Codex home as a working vendor
+        // session remains [inferred] (`docs/research/codex-cli.md` §5).
+
+        // 1. Refuse if the tool is running. Error has no ToolRunning
+        // variant; ConfigWrite is the closest existing one (we are
+        // refusing a write). A dedicated variant would be better so the
+        // UI can render a distinct "close the tool" recovery path.
+        match self.tool_is_running() {
+            Ok(true) => {
+                return Err(self.config_write(
+                    "Codex CLI appears to be running (process name `codex`). \
+                     Close the Codex CLI and any VS Code Codex extension \
+                     (`codex app-server`) before switching. Replacing \
+                     auth.json while the tool is running can corrupt the \
+                     credential file",
+                ));
+            }
+            Ok(false) => {}
+            Err(_) => {
+                return Err(self.config_write(
+                    "could not determine whether Codex CLI is running; \
+                     refusing to replace auth.json. Close the Codex CLI \
+                     and any VS Code Codex extension (`codex app-server`), \
+                     then retry",
+                ));
+            }
+        }
+
+        // Structure-only read of the per-account file (exists, regular
+        // file, JSON object). Unknown accounts must not snapshot or
+        // write. This is not a CredentialStore lookup: we move a file.
+        let (_source, bytes) = self.load_account_auth(account_id)?;
+
+        let Some(live_auth) = self.codex_home().map(|root| root.join("auth.json")) else {
+            return Err(self.config_write("Codex home directory is unavailable"));
+        };
+
+        // 2. Snapshot every path in config_paths() before anything is
+        // written anywhere.
+        let store = self.backup_store()?;
+        let backup = store.snapshot(self.id(), &self.config_paths())?;
+
+        let fail = |reason: String| Err(self.abort_switch(&store, &backup, reason));
+
+        #[cfg(test)]
+        if self.fault == SwitchFault::AfterSnapshot {
+            return fail("injected failure after snapshot".to_string());
+        }
+
+        // 3. Write the target document into the live home atomically.
+        // config.toml and every other live-home file are left untouched.
+        if let Some(parent) = live_auth.parent() {
+            if let Err(error) = fsx::create_dir_all_private(parent) {
+                return fail(format!("could not create {}: {error}", parent.display()));
+            }
+        }
+        if let Err(error) = fsx::write_atomic(&live_auth, &bytes) {
+            return fail(format!("could not write {}: {error}", live_auth.display()));
+        }
+
+        #[cfg(test)]
+        if self.fault == SwitchFault::AfterWrite {
+            return fail("injected failure after write".to_string());
+        }
+
+        // 4. Verify the live file is the document we intended. See
+        // `verify_live_auth` for what this does and does not prove.
+        if let Err(error) = self.verify_live_auth(&live_auth, &bytes) {
+            let reason = match error {
+                Error::ConfigWrite { reason, .. } => reason,
+                other => other.to_string(),
+            };
+            return fail(reason);
+        }
+
+        Ok(())
     }
 }
 
@@ -379,13 +694,351 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_is_experimental_while_activate_account_is_unimplemented() {
+    fn descriptor_stays_experimental_after_switch_is_implemented() {
         let dir = tempfile::tempdir().expect("tempdir");
         let adapter = CodexCliAdapter::with_home(dir.path());
         assert_eq!(adapter.descriptor().maturity, Maturity::Experimental);
-        assert!(matches!(
-            adapter.activate_account("codex-cli-on-disk"),
-            Err(Error::NotImplemented("codex-cli::activate_account"))
-        ));
+        assert!(
+            !matches!(
+                adapter.activate_account("codex-cli-on-disk"),
+                Err(Error::NotImplemented(_))
+            ),
+            "activate_account is implemented; NotImplemented would be a lie"
+        );
+    }
+
+    const TARGET_ACCOUNT: &str = "acct-work";
+    const TARGET_AUTH: &str = r#"{
+  "auth_mode": "plan",
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token": "FAKE-id-token-0002",
+    "access_token": "FAKE-access-token-0002",
+    "refresh_token": "FAKE-refresh-token-0002",
+    "account_id": "FAKE-account-0002"
+  },
+  "last_refresh": "2026-08-18T00:00:00.000Z"
+}
+"#;
+
+    struct SwitchEnv {
+        live: tempfile::TempDir,
+        data: tempfile::TempDir,
+    }
+
+    impl SwitchEnv {
+        fn new() -> Self {
+            let live = staged_home("home");
+            let data = tempfile::tempdir().expect("data dir");
+            let account_dir = data.path().join("accounts/codex-cli").join(TARGET_ACCOUNT);
+            fs::create_dir_all(&account_dir).expect("account dir");
+            fs::write(account_dir.join("auth.json"), TARGET_AUTH).expect("target auth");
+            Self { live, data }
+        }
+
+        fn adapter(&self) -> CodexCliAdapter {
+            CodexCliAdapter::with_home(self.live.path())
+                .with_data_dir(self.data.path())
+                .with_tool_running(false)
+        }
+
+        fn backups(&self) -> BackupStore {
+            BackupStore::new(self.data.path().join("backups"))
+        }
+
+        fn digest(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+            digest_codex(self.live.path())
+        }
+    }
+
+    fn digest_codex(home: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let root = home.join(".codex");
+        let mut out = std::collections::BTreeMap::new();
+        collect_files(&root, &root, &mut out);
+        out
+    }
+
+    fn collect_files(
+        root: &Path,
+        path: &Path,
+        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) {
+        let metadata = fs::symlink_metadata(path).unwrap_or_else(|error| {
+            panic!("digest metadata for {}: {error}", path.display());
+        });
+        if metadata.is_file() {
+            let rel = path.strip_prefix(root).expect("path under .codex");
+            let key = rel
+                .iter()
+                .map(|component| component.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.insert(key, fs::read(path).expect("digest read"));
+        } else if metadata.is_dir() {
+            for entry in fs::read_dir(path).expect("digest read_dir") {
+                collect_files(root, &entry.expect("dirent").path(), out);
+            }
+        }
+    }
+
+    fn files_except<'a>(
+        tree: &'a std::collections::BTreeMap<String, Vec<u8>>,
+        skip: &str,
+    ) -> std::collections::BTreeMap<&'a str, &'a [u8]> {
+        tree.iter()
+            .filter(|(path, _)| path.as_str() != skip)
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+            .collect()
+    }
+
+    fn digest_brief(tree: &std::collections::BTreeMap<String, Vec<u8>>) -> String {
+        tree.iter()
+            .map(|(path, bytes)| format!("{path} {}b", bytes.len()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn assert_switch_error_holds_no_secret(error: &Error) {
+        assert_no_fake("activate_account Display", &error.to_string());
+        assert_no_fake("activate_account Debug", &format!("{error:?}"));
+    }
+
+    #[test]
+    fn activate_account_replaces_auth_json_and_leaves_every_other_file_byte_identical() {
+        let env = SwitchEnv::new();
+        let before = env.digest();
+        assert_ne!(
+            before.get("auth.json").map(Vec::as_slice),
+            Some(TARGET_AUTH.as_bytes()),
+            "precondition: live auth.json must differ from the target"
+        );
+        assert!(
+            before.contains_key("config.toml"),
+            "precondition: live home must have config.toml"
+        );
+        assert!(
+            before.contains_key("sessions/history.jsonl"),
+            "precondition: live home must have a sibling the switch must not touch"
+        );
+
+        env.adapter()
+            .activate_account(TARGET_ACCOUNT)
+            .expect("switch");
+
+        let after = env.digest();
+        assert_eq!(
+            after.get("auth.json").map(Vec::as_slice),
+            Some(TARGET_AUTH.as_bytes()),
+            "live auth.json must be the target document"
+        );
+        assert_eq!(
+            files_except(&before, "auth.json"),
+            files_except(&after, "auth.json"),
+            "every other live-home file must be byte-identical; before={} after={}",
+            digest_brief(&before),
+            digest_brief(&after)
+        );
+    }
+
+    #[test]
+    fn activate_account_writes_a_backup_before_the_first_mutation() {
+        let env = SwitchEnv::new();
+        let before = env.digest();
+
+        let error = env
+            .adapter()
+            .with_fault(SwitchFault::AfterSnapshot)
+            .activate_account(TARGET_ACCOUNT)
+            .expect_err("injected failure after snapshot");
+        assert!(
+            matches!(error, Error::ConfigWrite { .. }),
+            "expected ConfigWrite, got {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("previous account is still active"),
+            "unexpected error: {error}"
+        );
+        assert_switch_error_holds_no_secret(&error);
+
+        let after = env.digest();
+        assert_eq!(
+            before,
+            after,
+            "a failure after snapshot must not mutate the live home; before={} after={}",
+            digest_brief(&before),
+            digest_brief(&after)
+        );
+
+        let listed = env.backups().list().expect("list backups");
+        assert_eq!(
+            listed.len(),
+            1,
+            "a restorable backup must exist before the first write"
+        );
+        assert_eq!(listed[0].provider_id, "codex-cli");
+        assert!(
+            env.data
+                .path()
+                .join("backups")
+                .join(listed[0].id.as_str())
+                .join("manifest.json")
+                .is_file(),
+            "backup manifest must already be on disk"
+        );
+    }
+
+    #[test]
+    fn activate_account_restores_the_live_home_after_a_forced_write_failure() {
+        let env = SwitchEnv::new();
+        let before = env.digest();
+
+        let error = env
+            .adapter()
+            .with_fault(SwitchFault::AfterWrite)
+            .activate_account(TARGET_ACCOUNT)
+            .expect_err("injected failure after write");
+        assert!(
+            matches!(error, Error::ConfigWrite { .. }),
+            "expected ConfigWrite, got {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("previous account is still active"),
+            "unexpected error: {error}"
+        );
+        assert_switch_error_holds_no_secret(&error);
+
+        let after = env.digest();
+        assert_eq!(
+            before,
+            after,
+            "restore must return the live home to a byte-identical state; before={} after={}",
+            digest_brief(&before),
+            digest_brief(&after)
+        );
+    }
+
+    #[test]
+    fn activate_account_rejects_an_unknown_account_without_touching_anything() {
+        let env = SwitchEnv::new();
+        let before = env.digest();
+
+        let error = env
+            .adapter()
+            .activate_account("no-such-account")
+            .expect_err("unknown account");
+        assert!(
+            matches!(error, Error::UnknownAccount(ref id) if id == "no-such-account"),
+            "expected UnknownAccount, got {error:?}"
+        );
+        assert_switch_error_holds_no_secret(&error);
+
+        let after = env.digest();
+        assert_eq!(
+            before,
+            after,
+            "unknown account must not mutate the live home; before={} after={}",
+            digest_brief(&before),
+            digest_brief(&after)
+        );
+        assert!(
+            env.backups().list().expect("list").is_empty(),
+            "unknown account must not write a backup"
+        );
+        assert!(
+            !env.data.path().join("backups").exists(),
+            "unknown account must not create the backup root"
+        );
+    }
+
+    #[test]
+    fn activate_account_rejects_a_path_escape_account_id_without_touching_anything() {
+        let env = SwitchEnv::new();
+        let before = env.digest();
+        let error = env
+            .adapter()
+            .activate_account("../etc")
+            .expect_err("escaped id");
+        assert!(
+            matches!(error, Error::UnknownAccount(ref id) if id == "../etc"),
+            "expected UnknownAccount, got {error:?}"
+        );
+        assert_eq!(before, env.digest());
+        assert!(!env.data.path().join("backups").exists());
+    }
+
+    #[test]
+    fn activate_account_refuses_while_the_tool_is_running_and_writes_nothing() {
+        let env = SwitchEnv::new();
+        let before = env.digest();
+
+        let error = env
+            .adapter()
+            .with_tool_running(true)
+            .activate_account(TARGET_ACCOUNT)
+            .expect_err("running tool");
+        assert!(
+            matches!(error, Error::ConfigWrite { .. }),
+            "expected ConfigWrite, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("appears to be running"),
+            "user must be told what is running: {error}"
+        );
+        assert!(
+            error.to_string().contains("codex app-server"),
+            "user must be told what to close: {error}"
+        );
+        assert_switch_error_holds_no_secret(&error);
+
+        let after = env.digest();
+        assert_eq!(
+            before,
+            after,
+            "running-tool refusal must write nothing; before={} after={}",
+            digest_brief(&before),
+            digest_brief(&after)
+        );
+        assert!(
+            !env.data.path().join("backups").exists(),
+            "running-tool refusal must not snapshot"
+        );
+    }
+
+    #[test]
+    fn activate_account_refuses_when_it_cannot_tell_whether_the_tool_is_running() {
+        let env = SwitchEnv::new();
+        let before = env.digest();
+
+        let error = env
+            .adapter()
+            .with_tool_undetermined()
+            .activate_account(TARGET_ACCOUNT)
+            .expect_err("cannot tell");
+        assert!(
+            matches!(error, Error::ConfigWrite { .. }),
+            "expected ConfigWrite, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("could not determine"),
+            "user must be told the check failed: {error}"
+        );
+        assert_switch_error_holds_no_secret(&error);
+
+        let after = env.digest();
+        assert_eq!(
+            before,
+            after,
+            "cannot-tell must write nothing; before={} after={}",
+            digest_brief(&before),
+            digest_brief(&after)
+        );
+        assert!(
+            !env.data.path().join("backups").exists(),
+            "cannot-tell must not snapshot"
+        );
     }
 }

@@ -10,9 +10,9 @@
 //! official documentation, `[inferred]` reasoned but unconfirmed,
 //! `[unknown]` not yet established. Never upgrade a marker without evidence.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{Account, InstallState, ProviderDescriptor, QuotaSnapshot};
 
 pub mod claude_code;
@@ -90,4 +90,157 @@ pub(crate) fn binary_on_path(binary: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path).any(|dir| dir.join(binary).is_file())
+}
+
+/// Directory that holds one managed account's vendor-issued files.
+///
+/// `{data_dir}/accounts/{provider_id}/{account_id}`. Callers pass
+/// `paths::project_dirs().data_dir()` in production so the identity triple
+/// is never spelled a second time. The live tool home (`~/.codex` and
+/// friends) is not one of these directories.
+pub(crate) fn managed_account_dir(data_dir: &Path, provider_id: &str, account_id: &str) -> PathBuf {
+    data_dir.join("accounts").join(provider_id).join(account_id)
+}
+
+/// Application-assigned account ids are path components. Reject anything
+/// that could escape the managed-account tree.
+pub(crate) fn account_id_is_safe(account_id: &str) -> bool {
+    !account_id.is_empty()
+        && account_id.len() <= 128
+        && !account_id.contains("..")
+        && account_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+/// Whether a process whose `comm` or argv0 file name equals `name` appears
+/// to be running.
+///
+/// Detecting by process name is inherently approximate: a renamed binary
+/// is a false negative; an unrelated program that reused the name is a
+/// false positive. A pid whose `comm` and cmdline are both unreadable is
+/// skipped (another false-negative window). When the process table itself
+/// cannot be read, this returns `Err` so a writer can refuse rather than
+/// guess. Off Linux there is no `/proc` scan, so this always returns `Err`.
+pub(crate) fn process_named_is_running(name: &str) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_process_named_is_running(name)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = name;
+        Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cannot inspect the process table on this platform",
+        )))
+    }
+}
+
+/// `comm` (trimmed) or the argv0 file name equals `name` (or `name.exe`).
+///
+/// Substring matches are rejected: `codex-helper` is not `codex`. `comm`
+/// is Linux's 15-character process name; `codex` fits.
+pub(crate) fn process_name_matches(name: &str, comm: &str, argv0: &str) -> bool {
+    if comm == name {
+        return true;
+    }
+    let exe = Path::new(argv0)
+        .file_name()
+        .and_then(|component| component.to_str())
+        .unwrap_or("");
+    exe == name || exe.strip_suffix(".exe") == Some(name)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_named_is_running(name: &str) -> Result<bool> {
+    let proc = Path::new("/proc");
+    let entries = std::fs::read_dir(proc).map_err(|error| {
+        Error::Io(std::io::Error::new(
+            error.kind(),
+            format!("reading /proc: {error}"),
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Error::Io(std::io::Error::new(
+                error.kind(),
+                format!("reading /proc: {error}"),
+            ))
+        })?;
+        let file_name = entry.file_name();
+        let Some(pid) = file_name
+            .to_str()
+            .filter(|label| !label.is_empty() && label.bytes().all(|byte| byte.is_ascii_digit()))
+        else {
+            continue;
+        };
+        let dir = proc.join(pid);
+        let comm = std::fs::read_to_string(dir.join("comm")).unwrap_or_default();
+        let cmdline = std::fs::read(dir.join("cmdline")).unwrap_or_default();
+        if comm.is_empty() && cmdline.is_empty() {
+            // Unreadable pid: cannot tell whether it is `name`. Skipping
+            // it is a known false-negative window (see the function doc).
+            continue;
+        }
+        let argv0 = cmdline
+            .split(|byte| *byte == 0)
+            .next()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .unwrap_or("");
+        if process_name_matches(name, comm.trim(), argv0) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_id_is_safe_rejects_path_escape() {
+        assert!(account_id_is_safe("acct-work"));
+        assert!(account_id_is_safe("codex-cli-on-disk"));
+        assert!(!account_id_is_safe(""));
+        assert!(!account_id_is_safe("../etc"));
+        assert!(!account_id_is_safe("acct/work"));
+        assert!(!account_id_is_safe("acct work"));
+    }
+
+    #[test]
+    fn managed_account_dir_nests_provider_then_account() {
+        let root = Path::new("/data");
+        assert_eq!(
+            managed_account_dir(root, "codex-cli", "acct-work"),
+            PathBuf::from("/data/accounts/codex-cli/acct-work")
+        );
+    }
+
+    #[test]
+    fn process_name_matches_is_exact() {
+        assert!(process_name_matches("codex", "codex", ""));
+        assert!(process_name_matches("codex", "", "/usr/bin/codex"));
+        assert!(process_name_matches("codex", "", "/usr/bin/codex.exe"));
+        assert!(!process_name_matches("codex", "codex-helper", ""));
+        assert!(!process_name_matches("codex", "", "/usr/bin/codex-helper"));
+        assert!(!process_name_matches(
+            "codex",
+            "cargo",
+            "/path/M4-codex-switch/target/debug/deps/foo"
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_named_is_running_is_false_for_an_absent_name() {
+        assert!(!process_named_is_running("cam-absent-process-9f3a2c").unwrap());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn process_named_is_running_cannot_tell_off_linux() {
+        assert!(process_named_is_running("codex").is_err());
+    }
 }
