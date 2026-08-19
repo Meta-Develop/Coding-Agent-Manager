@@ -29,3 +29,4 @@ contributor could reverse in an afternoon.
 | [0004](0004-local-relay-protocol-translation.md)      | Local relay with protocol translation         | Accepted |
 | [0005](0005-gpl-3-0-license.md)                       | GPL-3.0-or-later                              | Accepted |
 | [0006](0006-clean-room-independent-implementation.md) | Clean-room independent implementation         | Accepted |
+| [0007](0007-reading-other-implementations.md)         | Reading other implementations                 | Accepted |
