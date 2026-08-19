@@ -11,7 +11,9 @@ const controlFocus =
  * Adds a stored account for one adapter. The name is the account id, so the
  * allowed characters are on screen before submit. Sign-in is not hosted in
  * this window: the command blocks on the vendor CLI in the launching
- * terminal, and that has to be visible before anyone clicks Add.
+ * terminal, and that has to be visible before anyone clicks Add. Closing
+ * this window does not cancel that login, and this application cannot
+ * cancel it either — say so here, not only after the command has started.
  */
 export default function AddAccountForm({
   provider,
@@ -33,7 +35,7 @@ export default function AddAccountForm({
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const accountId = name.trim()
-    const problem = accountIdProblem(accountId)
+    const problem = accountIdProblem(accountId, provider.id)
     if (problem !== null) {
       setValidation(problem)
       return
@@ -102,8 +104,10 @@ export default function AddAccountForm({
       <p id={explanationId} className="mt-2 text-sm text-ink-muted">
         Sign-in runs in {provider.displayName} itself, in the terminal that
         launched this application. This window does not host the prompt. Adding
-        an account does not return until that sign-in finishes or fails. A
-        window-hosted sign-in is not built yet.
+        an account does not return until that sign-in finishes or fails. Closing
+        this window or leaving this page does not cancel that sign-in, and this
+        application cannot cancel it either. A window-hosted sign-in is not
+        built yet.
       </p>
       {validation !== null && (
         <p id={errorId} className="mt-2 text-sm" role="alert">
@@ -114,12 +118,21 @@ export default function AddAccountForm({
   )
 }
 
-function accountIdProblem(accountId: string): string | null {
+/** Matches `account_id_is_safe` plus the Codex live-slot reservation. */
+const CODEX_LIVE_SLOT_ID = 'codex-cli-on-disk'
+
+function accountIdProblem(
+  accountId: string,
+  providerId: string,
+): string | null {
   if (accountId === '') {
     return 'Enter an account name.'
   }
   if (!ACCOUNT_ID_PATTERN.test(accountId)) {
     return 'Use only letters, digits, `-` and `_`, at most 128 characters.'
+  }
+  if (providerId === 'codex-cli' && accountId === CODEX_LIVE_SLOT_ID) {
+    return `\`${accountId}\` is reserved for the live on-disk Codex identity; choose a different name.`
   }
   return null
 }
