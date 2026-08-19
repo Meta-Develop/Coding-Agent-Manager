@@ -2,25 +2,26 @@ import { useEffect, useState } from 'react'
 import NotImplemented from '@/components/NotImplemented'
 import PageHeader from '@/components/PageHeader'
 import { listAccounts, listProviders } from '@/lib/tauri'
-import type { Account, ProviderDescriptor } from '@/types'
+import type { ProviderAccountList, ProviderDescriptor } from '@/types'
 
 /**
  * What is known on this machine. Quota (`FR-5`) stays a placeholder because
- * no adapter publishes a usage signal (`NFR-8`).
+ * no adapter publishes a usage signal (`NFR-8`). Account counts and listing
+ * capability come from per-provider outcomes, not from adapter maturity.
  */
 export default function Dashboard() {
   const [providers, setProviders] = useState<ProviderDescriptor[]>([])
-  const [accounts, setAccounts] = useState<Account[]>([])
+  const [listings, setListings] = useState<ProviderAccountList[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     let cancelled = false
     Promise.all([listProviders(), listAccounts()])
-      .then(([nextProviders, nextAccounts]) => {
+      .then(([nextProviders, nextListings]) => {
         if (cancelled) return
         setProviders(nextProviders)
-        setAccounts(nextAccounts)
+        setListings(nextListings)
       })
       .catch((cause: unknown) => {
         if (cancelled) return
@@ -38,8 +39,16 @@ export default function Dashboard() {
   const detected = providers.filter(
     (provider) => provider.installState === 'installed',
   )
-  const cannotList = providers.filter(
-    (provider) => provider.maturity === 'planned',
+  const visibleCount = listings.reduce(
+    (count, listing) => count + listing.accounts.length,
+    0,
+  )
+  const cannotList = listings.filter(
+    (listing) => listing.outcome.kind === 'not-implemented',
+  )
+  const failed = listings.filter((listing) => listing.outcome.kind === 'failed')
+  const apiKeyOnly = listings.filter(
+    (listing) => listing.outcome.kind === 'listed-api-key-only',
   )
 
   return (
@@ -90,18 +99,30 @@ export default function Dashboard() {
                 <th scope="row" className="py-2 pr-4 text-left font-medium">
                   Visible accounts
                 </th>
-                <td className="py-2 text-ink-muted">{accounts.length}</td>
+                <td className="py-2 text-ink-muted">{visibleCount}</td>
               </tr>
               <tr className="border-t border-border-subtle">
                 <th scope="row" className="py-2 pr-4 text-left font-medium">
                   Adapters that cannot list accounts
                 </th>
                 <td className="py-2 text-ink-muted">
-                  {cannotList.length === 0
-                    ? 'None — every adapter can list accounts'
-                    : cannotList
-                        .map((provider) => provider.displayName)
-                        .join(', ')}
+                  {displayNames(cannotList, providers)}
+                </td>
+              </tr>
+              <tr className="border-t border-border-subtle">
+                <th scope="row" className="py-2 pr-4 text-left font-medium">
+                  Lookups that failed
+                </th>
+                <td className="py-2 text-ink-muted">
+                  {displayNames(failed, providers)}
+                </td>
+              </tr>
+              <tr className="border-t border-border-subtle">
+                <th scope="row" className="py-2 pr-4 text-left font-medium">
+                  Listings that see only an API key
+                </th>
+                <td className="py-2 text-ink-muted">
+                  {displayNames(apiKeyOnly, providers)}
                 </td>
               </tr>
             </tbody>
@@ -117,4 +138,20 @@ export default function Dashboard() {
       </div>
     </>
   )
+}
+
+function displayNames(
+  listings: ProviderAccountList[],
+  providers: ProviderDescriptor[],
+): string {
+  if (listings.length === 0) {
+    return 'None'
+  }
+  return listings
+    .map(
+      (listing) =>
+        providers.find((provider) => provider.id === listing.providerId)
+          ?.displayName ?? listing.providerId,
+    )
+    .join(', ')
 }
