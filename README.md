@@ -99,11 +99,11 @@ with [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Relationship to other projects
 
-Coding Agent Manager is an independent, clean-room implementation. It was
-inspired by the _problem_ that [`lbjlaq/Antigravity-Manager`][upstream] solves
-for a single vendor, and generalises it across every major coding agent. It
-shares no code, assets, or text with that project, and is not a fork of it.
-The reasoning is recorded in
+Coding Agent Manager is an independent implementation. It was inspired by the
+_problem_ that [`lbjlaq/Antigravity-Manager`][upstream] solves for a single
+vendor, and generalises it across every major coding agent. It shares no code,
+assets, or text with that project, and is not a fork of it. The reasoning is
+recorded in
 [`docs/adr/0006-clean-room-independent-implementation.md`](docs/adr/0006-clean-room-independent-implementation.md).
 
 [upstream]: https://github.com/lbjlaq/Antigravity-Manager
