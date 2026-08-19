@@ -273,6 +273,7 @@ untested on this host `[unknown]`.
 
   - https://raw.githubusercontent.com/superagent-ai/grok-cli/fb97af83f06dca873281d60168430f06c8de6324/README.md
   - https://raw.githubusercontent.com/superagent-ai/grok-cli/fb97af83f06dca873281d60168430f06c8de6324/src/storage/db.ts
+
 - Advisory locks are real here, not decorative. The protocol is in §5.
   Ignoring it risks corrupting the credential file and, worse, revoking the
   live grant.

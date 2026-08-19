@@ -15,7 +15,8 @@ export type AuthKind = 'oauth' | 'api-key' | 'unknown'
 export type InstallState = 'installed' | 'not-installed' | 'unknown'
 
 /** A mutating account operation an adapter actually implements. */
-export type ProviderCapability = 'add-account' | 'switch-account' | 'delete-account'
+export type ProviderCapability =
+  'add-account' | 'switch-account' | 'delete-account'
 
 export interface ProviderDescriptor {
   id: ProviderId
