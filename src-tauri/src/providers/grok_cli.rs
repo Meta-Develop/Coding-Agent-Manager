@@ -18,17 +18,21 @@
 //! - `~/.grok/models_cache.json` [verified-local] — may expose model
 //!   availability; not confirmed to carry quota.
 //!
-//! `$GROK_HOME` relocates the whole client home [verified-docs]. Keys are
-//! not user identities: the default client id is a configuration constant,
-//! so a second login overwrites the first. A switch is therefore one home
-//! per account, not selecting an active map entry.
+//! `$GROK_HOME` relocates the whole client home when it is set and non-empty
+//! [verified-docs] (`docs/research/grok-cli.md` §2). `$GROK_AUTH_PATH`, when
+//! set, overrides the credential file independently of that home — a
+//! relocated home does not move `auth.json`. Keys are not user identities:
+//! the default client id is a configuration constant, so a second login
+//! overwrites the first. A switch is therefore one home per account, not
+//! selecting an active map entry.
 //!
 //! `list_accounts` is read-only and returns only OIDC scopes that represent
 //! a signed-in identity. `activate_account` stays `NotImplemented` because
 //! there is no in-file selection mechanism, and the `$GROK_HOME` strategy
 //! is not implemented yet (`docs/research/grok-cli.md` §5).
 
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
@@ -63,30 +67,93 @@ impl GrokCliAdapter {
         }
     }
 
-    fn resolved_home(&self) -> Option<PathBuf> {
-        self.home.clone().or_else(home_dir)
-    }
-
-    /// Honours `GROK_HOME` before falling back to `~/.grok`.
-    ///
-    /// An injected root wins over `GROK_HOME` so a test is never affected by
-    /// the developer's own `GROK_HOME` (`docs/TESTING.md` §4). Production
-    /// leaves `home` unset, so the documented `[verified-docs]` override still
-    /// precedes `~/.grok`. Order: injected root, then `GROK_HOME`, then
-    /// `~/.grok`.
     fn grok_home(&self) -> Option<PathBuf> {
-        if self.home.is_some() {
-            return self.resolved_home().map(|home| home.join(".grok"));
-        }
-        if let Some(explicit) = std::env::var_os("GROK_HOME") {
-            return Some(PathBuf::from(explicit));
-        }
-        self.resolved_home().map(|home| home.join(".grok"))
+        resolve_grok_home(
+            self.home.as_deref(),
+            std::env::var_os("GROK_HOME").as_deref(),
+            home_dir().as_deref(),
+        )
     }
 
     fn auth_json_path(&self) -> Option<PathBuf> {
-        self.grok_home().map(|root| root.join("auth.json"))
+        resolve_auth_json_path(
+            self.home.as_deref(),
+            std::env::var_os("GROK_HOME").as_deref(),
+            std::env::var_os("GROK_AUTH_PATH").as_deref(),
+            home_dir().as_deref(),
+        )
     }
+}
+
+/// Resolve the grok home the way the vendor home crate does, with an injected
+/// test root in front so no test can be affected by a developer's environment
+/// (`docs/TESTING.md` §4).
+///
+/// Precedence (`docs/research/grok-cli.md` §2):
+/// 1. Injected root → `{injected}/.grok`. Tests pass a `TempDir`; production
+///    leaves this `None`.
+/// 2. `$GROK_HOME` when it is set **and non-empty**, returned verbatim (not
+///    canonicalized). Empty is treated as unset: the vendor crate filters it
+///    the same way, and `GROK_HOME=` would otherwise become a relative path
+///    from the process cwd.
+/// 3. `{os_home}/.grok`.
+fn resolve_grok_home(
+    injected_root: Option<&Path>,
+    grok_home_env: Option<&OsStr>,
+    os_home: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(root) = injected_root {
+        return Some(root.join(".grok"));
+    }
+    if let Some(explicit) = grok_home_env.filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(explicit));
+    }
+    os_home.map(|home| home.join(".grok"))
+}
+
+/// Path of the credential file this adapter reads.
+///
+/// `$GROK_AUTH_PATH`, when set, overrides `auth.json` independently of the
+/// grok home (`docs/research/grok-cli.md` §2). A `$GROK_HOME` relocation
+/// then no longer moves the credential file. The note says "when set", not
+/// "when set and non-empty" (unlike `$GROK_HOME`), so an empty value is
+/// still an override.
+///
+/// An injected test root still wins: a developer's `$GROK_AUTH_PATH` must
+/// not point a test at a live credential (`docs/TESTING.md` §4).
+fn resolve_auth_json_path(
+    injected_root: Option<&Path>,
+    grok_home_env: Option<&OsStr>,
+    grok_auth_path_env: Option<&OsStr>,
+    os_home: Option<&Path>,
+) -> Option<PathBuf> {
+    match (injected_root, grok_auth_path_env) {
+        (None, Some(explicit)) => Some(PathBuf::from(explicit)),
+        _ => resolve_grok_home(injected_root, grok_home_env, os_home)
+            .map(|root| root.join("auth.json")),
+    }
+}
+
+/// Paths this adapter actually reads. Backup and diagnostics use this list
+/// (`docs/ARCHITECTURE.md` §4), so a `$GROK_AUTH_PATH` override must appear
+/// here instead of `{grok_home}/auth.json`.
+fn resolve_config_paths(
+    injected_root: Option<&Path>,
+    grok_home_env: Option<&OsStr>,
+    grok_auth_path_env: Option<&OsStr>,
+    os_home: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(auth) =
+        resolve_auth_json_path(injected_root, grok_home_env, grok_auth_path_env, os_home)
+    {
+        paths.push(auth);
+    }
+    if let Some(root) = resolve_grok_home(injected_root, grok_home_env, os_home) {
+        paths.push(root.join("config.toml"));
+        paths.push(root.join("models_cache.json"));
+    }
+    paths
 }
 
 /// True for an `auth.json` key that represents a signed-in OIDC identity.
@@ -233,19 +300,17 @@ impl ProviderAdapter for GrokCliAdapter {
     }
 
     fn config_paths(&self) -> Vec<PathBuf> {
-        let Some(root) = self.grok_home() else {
-            return Vec::new();
-        };
         // `auth.json.lock` and `active_sessions.json` exist [verified-local]
         // (`docs/research/grok-cli.md` §5, §8; `docs/ARCHITECTURE.md` §8).
         // A future `activate_account` must acquire the lock the way the CLI
         // does and refuse a switch while a session is running. This adapter
         // does not write, so those paths stay off this list.
-        vec![
-            root.join("auth.json"),
-            root.join("config.toml"),
-            root.join("models_cache.json"),
-        ]
+        resolve_config_paths(
+            self.home.as_deref(),
+            std::env::var_os("GROK_HOME").as_deref(),
+            std::env::var_os("GROK_AUTH_PATH").as_deref(),
+            home_dir().as_deref(),
+        )
     }
 
     fn detect(&self) -> InstallState {
@@ -254,9 +319,13 @@ impl ProviderAdapter for GrokCliAdapter {
         // `user-settings.json` rather than `auth.json` / `config.toml`
         // (`docs/research/grok-cli.md` §8). The directory name is not
         // evidence of the official CLI.
-        let has_official_config = self.grok_home().is_some_and(|root| {
-            root.join("auth.json").is_file() || root.join("config.toml").is_file()
-        });
+        // Official-CLI evidence is the credential file this adapter actually
+        // reads (`$GROK_AUTH_PATH` when set, else `{grok_home}/auth.json`) or
+        // `{grok_home}/config.toml` (`docs/research/grok-cli.md` §2, §8).
+        let has_official_config = self.auth_json_path().is_some_and(|path| path.is_file())
+            || self
+                .grok_home()
+                .is_some_and(|root| root.join("config.toml").is_file());
         if binary_on_path("grok") || has_official_config {
             InstallState::Installed
         } else {
@@ -376,6 +445,137 @@ mod tests {
             "{}\n{accounts:?}",
             serde_json::to_string(accounts).expect("serialize accounts")
         )
+    }
+
+    #[test]
+    fn empty_grok_home_is_not_an_override() {
+        let os_home = Path::new("/home/u");
+        assert_eq!(
+            resolve_grok_home(None, Some(OsStr::new("")), Some(os_home)),
+            Some(os_home.join(".grok"))
+        );
+        assert_eq!(
+            resolve_grok_home(None, None, Some(os_home)),
+            Some(os_home.join(".grok"))
+        );
+    }
+
+    #[test]
+    fn non_empty_grok_home_wins_over_the_default_home() {
+        assert_eq!(
+            resolve_grok_home(
+                None,
+                Some(OsStr::new("/custom/grok")),
+                Some(Path::new("/home/u")),
+            ),
+            Some(PathBuf::from("/custom/grok"))
+        );
+    }
+
+    #[test]
+    fn injected_root_beats_grok_home_auth_path_and_the_default_home() {
+        let injected = Path::new("/tmp/fixture-home");
+        assert_eq!(
+            resolve_grok_home(
+                Some(injected),
+                Some(OsStr::new("/custom/grok")),
+                Some(Path::new("/home/u")),
+            ),
+            Some(injected.join(".grok"))
+        );
+        assert_eq!(
+            resolve_auth_json_path(
+                Some(injected),
+                Some(OsStr::new("/custom/grok")),
+                Some(OsStr::new("/elsewhere/auth.json")),
+                Some(Path::new("/home/u")),
+            ),
+            Some(injected.join(".grok").join("auth.json"))
+        );
+        let paths = resolve_config_paths(
+            Some(injected),
+            Some(OsStr::new("/custom/grok")),
+            Some(OsStr::new("/elsewhere/auth.json")),
+            Some(Path::new("/home/u")),
+        );
+        assert!(
+            paths.iter().all(|path| path.starts_with(injected)),
+            "injected config_paths escaped the fixture root: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn grok_auth_path_does_not_move_with_grok_home() {
+        // `docs/research/grok-cli.md` §2: when set, `$GROK_AUTH_PATH` overrides
+        // independently of the grok home. Relocating `$GROK_HOME` then no
+        // longer moves the credential file.
+        assert_eq!(
+            resolve_auth_json_path(
+                None,
+                Some(OsStr::new("/relocated/grok")),
+                Some(OsStr::new("/elsewhere/auth.json")),
+                Some(Path::new("/home/u")),
+            ),
+            Some(PathBuf::from("/elsewhere/auth.json"))
+        );
+        assert_eq!(
+            resolve_grok_home(
+                None,
+                Some(OsStr::new("/relocated/grok")),
+                Some(Path::new("/home/u")),
+            ),
+            Some(PathBuf::from("/relocated/grok"))
+        );
+        assert_eq!(
+            resolve_auth_json_path(
+                None,
+                Some(OsStr::new("/relocated/grok")),
+                None,
+                Some(Path::new("/home/u")),
+            ),
+            Some(PathBuf::from("/relocated/grok/auth.json"))
+        );
+        assert_eq!(
+            resolve_config_paths(
+                None,
+                Some(OsStr::new("/relocated/grok")),
+                Some(OsStr::new("/elsewhere/auth.json")),
+                Some(Path::new("/home/u")),
+            ),
+            vec![
+                PathBuf::from("/elsewhere/auth.json"),
+                PathBuf::from("/relocated/grok/config.toml"),
+                PathBuf::from("/relocated/grok/models_cache.json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_grok_auth_path_is_still_an_override() {
+        // The note says "when set" for `$GROK_AUTH_PATH`, not "when set and
+        // non-empty" as it does for `$GROK_HOME` (`docs/research/grok-cli.md`
+        // §2). The vendor `AuthManager` uses `std::env::var`, which treats
+        // empty as present.
+        assert_eq!(
+            resolve_auth_json_path(
+                None,
+                Some(OsStr::new("/relocated/grok")),
+                Some(OsStr::new("")),
+                Some(Path::new("/home/u")),
+            ),
+            Some(PathBuf::from(""))
+        );
+    }
+
+    #[test]
+    fn grok_auth_path_alone_is_enough_to_report_the_credential_file() {
+        assert_eq!(resolve_grok_home(None, None, None), None);
+        assert_eq!(resolve_auth_json_path(None, None, None, None), None);
+        assert!(resolve_config_paths(None, None, None, None).is_empty());
+        assert_eq!(
+            resolve_config_paths(None, None, Some(OsStr::new("/elsewhere/auth.json")), None,),
+            vec![PathBuf::from("/elsewhere/auth.json")]
+        );
     }
 
     #[test]
