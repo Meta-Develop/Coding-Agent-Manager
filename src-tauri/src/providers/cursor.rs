@@ -56,6 +56,7 @@ impl ProviderAdapter for CursorAdapter {
             auth_kinds: vec![AuthKind::Unknown],
             maturity: Maturity::Planned,
             install_state: self.detect(),
+            capabilities: Vec::new(),
         }
     }
 

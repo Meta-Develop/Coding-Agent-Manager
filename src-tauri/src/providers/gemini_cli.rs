@@ -124,6 +124,7 @@ impl ProviderAdapter for GeminiCliAdapter {
             // adapter (NFR-8).
             maturity: Maturity::Experimental,
             install_state: self.detect(),
+            capabilities: Vec::new(),
         }
     }
 

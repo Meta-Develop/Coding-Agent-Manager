@@ -23,10 +23,11 @@ pub mod grok_cli;
 
 /// The contract every managed tool must satisfy.
 ///
-/// Implementations must be side-effect free except in [`activate_account`]
-/// and [`add_account`]. [`activate_account`] must write a recoverable backup
-/// before it replaces any file the user's tool owns (NFR-4 in `docs/SPEC.md`).
-/// [`add_account`] must not touch the live tool home.
+/// Implementations must be side-effect free except in [`activate_account`],
+/// [`add_account`], and [`delete_account`]. [`activate_account`] must write
+/// a recoverable backup before it replaces any file the user's tool owns
+/// (NFR-4 in `docs/SPEC.md`). [`add_account`] and [`delete_account`] must
+/// not touch the live tool home.
 pub trait ProviderAdapter: Send + Sync {
     /// Stable identifier used in config, IPC, and on disk. Never renamed.
     fn id(&self) -> &'static str;
@@ -66,6 +67,16 @@ pub trait ProviderAdapter: Send + Sync {
     /// not grown this method cannot be mistaken for one that has (NFR-8).
     fn add_account(&self, _account_id: &str) -> Result<()> {
         Err(Error::NotImplemented("add_account"))
+    }
+
+    /// Forget a stored account: remove the per-account directory this application
+    /// created for it. The live tool home is not touched, so deleting the account
+    /// that is currently active does not sign the user out of the tool.
+    ///
+    /// The default returns [`Error::NotImplemented`] so an adapter that has
+    /// not grown this method cannot be mistaken for one that has (NFR-8).
+    fn delete_account(&self, _account_id: &str) -> Result<()> {
+        Err(Error::NotImplemented("delete_account"))
     }
 
     /// Quota signals the provider exposes, if any.

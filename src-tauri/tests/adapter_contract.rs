@@ -20,7 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use coding_agent_manager_lib::error::Error;
-use coding_agent_manager_lib::model::{Account, Maturity};
+use coding_agent_manager_lib::model::{Account, Maturity, ProviderCapability};
 use coding_agent_manager_lib::providers::claude_code::ClaudeCodeAdapter;
 use coding_agent_manager_lib::providers::codex_cli::CodexCliAdapter;
 use coding_agent_manager_lib::providers::cursor::CursorAdapter;
@@ -307,45 +307,59 @@ fn activate_account_is_implemented_or_exactly_not_implemented() {
     }
 }
 
-/// `NFR-8`: an adapter that has grown `add_account` must not return
-/// `NotImplemented` from it, and one that has not must.
+/// `NFR-8`: advertised capabilities must match method implementation.
 ///
-/// The probe id is not a safe path component, so a real implementation
-/// refuses before creating a directory or spawning the vendor CLI. The
-/// suite therefore never starts `codex`, never reaches the keychain, and
-/// never writes into the real data directory or the real home
-/// (`docs/TESTING.md` §4). `codex-cli` is the adapter that implements
-/// the method today; a later implementation must be added to the
-/// implemented set rather than quietly claiming the default stub.
+/// An adapter that lists a capability must not return `NotImplemented`
+/// from the corresponding method, and one that omits it must. The probe
+/// id is not a safe path component, so a real implementation refuses
+/// before creating a directory, writing the live home, or spawning the
+/// vendor CLI. The suite therefore never starts `codex`, never reaches
+/// the keychain, and never writes into the real data directory or the
+/// real home (`docs/TESTING.md` §4).
 #[test]
-fn add_account_is_implemented_or_exactly_not_implemented() {
+fn advertised_capabilities_match_method_implementation() {
+    const PROBE: &str = "../etc";
+    let expected = [
+        ProviderCapability::AddAccount,
+        ProviderCapability::SwitchAccount,
+        ProviderCapability::DeleteAccount,
+    ];
+
     for id in registry_ids() {
         let home = staged_home(id);
         let adapter = adapter_for_home(id, home.path());
+        let advertised = adapter.descriptor().capabilities;
         let before = tree_digest(home.path());
-        let result = adapter.add_account("../etc");
-        let after = tree_digest(home.path());
-        assert_eq!(
-            before,
-            after,
-            "`{id}` broke add_account: a path-escape id must not mutate \
-             the home:\n{}",
-            before.diff(&after)
-        );
 
-        let not_implemented = matches!(result, Err(Error::NotImplemented(_)));
-        if id == "codex-cli" {
-            assert!(
-                !not_implemented,
-                "`codex-cli` implements add_account; NotImplemented would \
-                 be a lie (got {result:?})"
+        for capability in expected {
+            let result = match capability {
+                ProviderCapability::AddAccount => adapter.add_account(PROBE),
+                ProviderCapability::SwitchAccount => adapter.activate_account(PROBE),
+                ProviderCapability::DeleteAccount => adapter.delete_account(PROBE),
+            };
+            let after = tree_digest(home.path());
+            assert_eq!(
+                before,
+                after,
+                "`{id}` broke {capability:?}: a path-escape id must not mutate \
+                 the home:\n{}",
+                before.diff(&after)
             );
-        } else {
-            assert!(
-                not_implemented,
-                "`{id}` has not implemented add_account; returning \
-                 {result:?} would overstate what the adapter can do (NFR-8)"
-            );
+
+            let not_implemented = matches!(result, Err(Error::NotImplemented(_)));
+            if advertised.contains(&capability) {
+                assert!(
+                    !not_implemented,
+                    "`{id}` advertises {capability:?}; NotImplemented would \
+                     be a lie (got {result:?})"
+                );
+            } else {
+                assert!(
+                    not_implemented,
+                    "`{id}` does not advertise {capability:?}; returning \
+                     {result:?} would overstate what the adapter can do (NFR-8)"
+                );
+            }
         }
     }
 }
