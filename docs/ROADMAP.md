@@ -55,8 +55,9 @@ Satisfies: `FR-1`, `FR-2`, `FR-4`.
 
 - Codex CLI: read, list, switch by `auth.json` replacement, plus the
   `CODEX_HOME` strategy where the launch path is controlled.
-- Grok CLI: read, list, switch by active-identity selection, honouring
-  `auth.json.lock` and refusing while a session is active.
+- Grok CLI: read, list signed-in OIDC identities, switch by relocating
+  `$GROK_HOME` per account, honouring `auth.json.lock` and refusing while a
+  session is active.
 - Accounts page: import, label, list, switch, with switch verification.
 - Adapter contract test suite, running over both.
 

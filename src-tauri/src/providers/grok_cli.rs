@@ -2,12 +2,14 @@
 //!
 //! Observed layout on Linux, grok 0.2.93:
 //!
-//! - `~/.grok/auth.json` [verified-local] — a map keyed by
-//!   `"<oidc-issuer>::<client-uuid>"`. Each entry carries `key`, `auth_mode`,
+//! - `~/.grok/auth.json` [verified-local] — a map keyed by provider scope
+//!   `"{issuer}::{client_id}"`. OIDC entries carry `key`, `auth_mode`,
 //!   `create_time`, `user_id`, `email`, `first_name`,
 //!   `profile_image_asset_id`, `principal_type`, `principal_id`, `team_id`,
 //!   `coding_data_retention_opt_out`, `refresh_token`, `expires_at`,
-//!   `oidc_issuer`, and `oidc_client_id`.
+//!   `oidc_issuer`, and `oidc_client_id`. Reserved non-OIDC keys
+//!   (`xai::api_key`, `https://accounts.x.ai/sign-in`) also live in that
+//!   map [verified-docs].
 //! - `~/.grok/config.toml` [verified-local] — client configuration, including
 //!   `[marketplace]` and `[[marketplace.sources]]`.
 //! - `~/.grok/auth.json.lock`, `~/.grok/active_sessions.json`,
@@ -16,14 +18,15 @@
 //! - `~/.grok/models_cache.json` [verified-local] — may expose model
 //!   availability; not confirmed to carry quota.
 //!
-//! Grok is the most promising switching target after Codex: `auth.json` is
-//! keyed per identity, so several accounts can coexist and a switch may reduce
-//! to selecting the active key rather than swapping whole files. That must be
-//! confirmed before it is relied on.
+//! `$GROK_HOME` relocates the whole client home [verified-docs]. Keys are
+//! not user identities: the default client id is a configuration constant,
+//! so a second login overwrites the first. A switch is therefore one home
+//! per account, not selecting an active map entry.
 //!
-//! `list_accounts` is read-only. `activate_account` stays `NotImplemented`
-//! because how the CLI selects the active identity is `[unknown]`
-//! (`docs/research/grok-cli.md` §5, §9). A write path must not depend on that.
+//! `list_accounts` is read-only and returns only OIDC scopes that represent
+//! a signed-in identity. `activate_account` stays `NotImplemented` because
+//! there is no in-file selection mechanism, and the `$GROK_HOME` strategy
+//! is not implemented yet (`docs/research/grok-cli.md` §5).
 
 use std::path::PathBuf;
 
@@ -34,6 +37,15 @@ use crate::error::{Error, Result};
 use crate::model::{Account, AuthKind, InstallState, Maturity, ProviderDescriptor};
 
 const PROVIDER_ID: &str = "grok-cli";
+
+/// Map keys that live in `auth.json` but are not a signed-in identity.
+///
+/// `xai::api_key` is the API-key auth scope (`grok login --api-key`).
+/// `https://accounts.x.ai/sign-in` is the legacy pre-OIDC scope; the CLI
+/// skips a WebLogin token under it. Listing either as an account would
+/// present a reserved entry as a user identity
+/// (`docs/research/grok-cli.md` §3).
+const RESERVED_SCOPES: &[&str] = &["xai::api_key", "https://accounts.x.ai/sign-in"];
 
 #[derive(Debug, Default)]
 pub struct GrokCliAdapter {
@@ -55,10 +67,35 @@ impl GrokCliAdapter {
         self.home.clone().or_else(home_dir)
     }
 
-    fn auth_json_path(&self) -> Option<PathBuf> {
-        self.resolved_home()
-            .map(|home| home.join(".grok").join("auth.json"))
+    /// Honours `GROK_HOME` before falling back to `~/.grok`.
+    ///
+    /// An injected root wins over `GROK_HOME` so a test is never affected by
+    /// the developer's own `GROK_HOME` (`docs/TESTING.md` §4). Production
+    /// leaves `home` unset, so the documented `[verified-docs]` override still
+    /// precedes `~/.grok`. Order: injected root, then `GROK_HOME`, then
+    /// `~/.grok`.
+    fn grok_home(&self) -> Option<PathBuf> {
+        if self.home.is_some() {
+            return self.resolved_home().map(|home| home.join(".grok"));
+        }
+        if let Some(explicit) = std::env::var_os("GROK_HOME") {
+            return Some(PathBuf::from(explicit));
+        }
+        self.resolved_home().map(|home| home.join(".grok"))
     }
+
+    fn auth_json_path(&self) -> Option<PathBuf> {
+        self.grok_home().map(|root| root.join("auth.json"))
+    }
+}
+
+/// True for an `auth.json` key that represents a signed-in OIDC identity.
+///
+/// OIDC scopes are `"{issuer}::{client_id}"`. The reserved API-key scope
+/// also contains `::`, so membership in [`RESERVED_SCOPES`] is excluded
+/// first (`docs/research/grok-cli.md` §3).
+fn is_oidc_identity_scope(key: &str) -> bool {
+    !RESERVED_SCOPES.contains(&key) && key.contains("::")
 }
 
 /// Mask an email for display in the shape `docs/SPEC.md` uses: `a***@example.com`.
@@ -83,7 +120,7 @@ fn mask_email(email: &str) -> Option<String> {
 /// change. We therefore hash the key with FNV-1a 64-bit (stable across rustc
 /// versions, unlike `DefaultHasher`; no hash crate is in this package) and
 /// prefix `grok-cli-` so the id is recognisably ours. A CLI home holds a
-/// handful of identities, so 64-bit collision resistance is enough.
+/// handful of scopes, so 64-bit collision resistance is enough.
 /// ponytail: upgrade to SHA-256 if a hash crate is added to this package.
 fn derive_account_id(identity_key: &str) -> String {
     format!("{PROVIDER_ID}-{:016x}", fnv1a64(identity_key.as_bytes()))
@@ -117,11 +154,13 @@ fn config_read(reason: impl Into<String>) -> Error {
 
 /// Classify from fields that are `[verified-local]` OIDC evidence only.
 ///
-/// `docs/research/grok-cli.md` §4: the entry carries `oidc_issuer`,
-/// `oidc_client_id`, and `refresh_token`. An API-key mode is merely
-/// `[inferred]` from `auth_mode`, so this function does not read `auth_mode`
-/// and never returns `AuthKind::ApiKey`. Anything not recognisably OIDC is
-/// `Unknown`. Presence is checked without copying secret values.
+/// `docs/research/grok-cli.md` §4: an OIDC entry carries `oidc_issuer`,
+/// `oidc_client_id`, and `refresh_token`. API-key auth is first-class
+/// `[verified-docs]` but lives under the reserved `xai::api_key` scope,
+/// which `list_accounts` excludes. This function does not read
+/// `auth_mode` and never returns `AuthKind::ApiKey`. Anything not
+/// recognisably OIDC is `Unknown`. Presence is checked without copying
+/// secret values.
 fn auth_kind_of(entry: &Map<String, Value>) -> AuthKind {
     let is_string = |key: &str| entry.get(key).is_some_and(Value::is_string);
     if is_string("oidc_issuer") && is_string("oidc_client_id") && is_string("refresh_token") {
@@ -161,10 +200,9 @@ fn account_from_entry(identity_key: &str, value: &Value) -> Result<Account> {
         label: String::new(),
         masked_identity,
         auth_kind: auth_kind_of(entry),
-        // How the CLI picks the active identity is `[unknown]`
-        // (`docs/research/grok-cli.md` §5, §9). NFR-8 forbids claiming
-        // otherwise. Not most-recently-created, not file order, not "the
-        // only one".
+        // There is no in-file selection (`docs/research/grok-cli.md` §5).
+        // NFR-8 forbids marking an entry active. Not most-recently-created,
+        // not file order, not "the only one".
         is_active: false,
         expires_at,
     })
@@ -191,14 +229,13 @@ impl ProviderAdapter for GrokCliAdapter {
     }
 
     fn config_paths(&self) -> Vec<PathBuf> {
-        let Some(home) = self.resolved_home() else {
+        let Some(root) = self.grok_home() else {
             return Vec::new();
         };
-        let root = home.join(".grok");
         // `auth.json.lock` and `active_sessions.json` exist [verified-local]
         // (`docs/research/grok-cli.md` §5, §8; `docs/ARCHITECTURE.md` §8).
         // A future `activate_account` must acquire the lock the way the CLI
-        // does and refuse a switch while a session is running. This commit
+        // does and refuse a switch while a session is running. This adapter
         // does not write, so those paths stay off this list.
         vec![
             root.join("auth.json"),
@@ -208,25 +245,29 @@ impl ProviderAdapter for GrokCliAdapter {
     }
 
     fn detect(&self) -> InstallState {
-        let has_config = self
-            .resolved_home()
-            .map(|home| home.join(".grok").is_dir())
-            .unwrap_or(false);
-        if binary_on_path("grok") || has_config {
+        // `~/.grok` is also used by the unaffiliated community CLI
+        // `superagent-ai/grok-cli`, which stores `grok.db` and
+        // `user-settings.json` rather than `auth.json` / `config.toml`
+        // (`docs/research/grok-cli.md` §8). The directory name is not
+        // evidence of the official CLI.
+        let has_official_config = self.grok_home().is_some_and(|root| {
+            root.join("auth.json").is_file() || root.join("config.toml").is_file()
+        });
+        if binary_on_path("grok") || has_official_config {
             InstallState::Installed
         } else {
             InstallState::NotInstalled
         }
     }
 
-    /// Accounts visible in `~/.grok/auth.json`.
+    /// Signed-in OIDC identities visible in `auth.json`.
     ///
-    /// Every account is returned with `is_active: false`. How the CLI
-    /// decides which identity the tool will use is `[unknown]`
-    /// (`docs/research/grok-cli.md` §5, §9). `NFR-8` forbids claiming
-    /// otherwise; the answer belongs to that open question. Guessing —
-    /// most-recently-created, file order, or "the only one" — is the
-    /// signal to stop and leave the question in the research note.
+    /// Reserved scopes (`xai::api_key`, the legacy pre-OIDC key) are
+    /// skipped: they are not user identities (`docs/research/grok-cli.md`
+    /// §3). Every returned account has `is_active: false`. There is no
+    /// in-file selection; `$GROK_HOME` is the vendor switch and is not
+    /// implemented yet (`docs/research/grok-cli.md` §5). `NFR-8` forbids
+    /// marking an entry active.
     fn list_accounts(&self) -> Result<Vec<Account>> {
         let Some(path) = self.auth_json_path() else {
             return Ok(Vec::new());
@@ -246,14 +287,17 @@ impl ProviderAdapter for GrokCliAdapter {
             .map_err(|_| config_read("auth.json is not valid JSON"))?;
         let Some(map) = value.as_object() else {
             return Err(config_read(
-                "auth.json is not a JSON object keyed by identity",
+                "auth.json is not a JSON object keyed by provider scope",
             ));
         };
 
         // serde_json::Map is a BTreeMap unless the `preserve_order` feature
         // is on, and a HashMap round-trip would shuffle keys. Sort
         // explicitly so two identities always come back in the same order.
-        let mut keys: Vec<&String> = map.keys().collect();
+        let mut keys: Vec<&String> = map
+            .keys()
+            .filter(|key| is_oidc_identity_scope(key))
+            .collect();
         keys.sort();
 
         let mut accounts = Vec::with_capacity(keys.len());
@@ -264,6 +308,9 @@ impl ProviderAdapter for GrokCliAdapter {
     }
 
     fn activate_account(&self, _account_id: &str) -> Result<()> {
+        // There is no in-file selection among map keys. The vendor switch
+        // is `$GROK_HOME`, which this adapter does not implement yet
+        // (`docs/research/grok-cli.md` §5).
         Err(Error::NotImplemented("grok-cli::activate_account"))
     }
 }
@@ -432,8 +479,9 @@ mod tests {
 
     #[test]
     fn auth_mode_alone_is_unknown_not_api_key() {
-        // API-key mode is only [inferred] from auth_mode. We must not
-        // branch on a guessed marker.
+        // API-key auth lives under the reserved `xai::api_key` scope, not
+        // under an OIDC key's `auth_mode` field. We must not branch on
+        // that field.
         let temp = tempfile::tempdir().expect("tempdir");
         write_auth(
             temp.path(),
@@ -474,6 +522,49 @@ mod tests {
         let accounts = adapter.list_accounts().expect("list_accounts");
         assert_eq!(accounts[0].expires_at, None);
         assert_no_fake("bad expires_at", &surfaces(&accounts));
+    }
+
+    #[test]
+    fn list_accounts_skips_reserved_scopes() {
+        let (_tmp, adapter) = adapter_over_fixture("reserved-scopes");
+        let accounts = adapter.list_accounts().expect("list_accounts");
+
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(
+            accounts[0].id,
+            derive_account_id("https://auth.example.invalid::aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0001")
+        );
+        assert_eq!(accounts[0].auth_kind, AuthKind::OAuth);
+        assert!(!accounts[0].is_active);
+        assert_no_fake("reserved-scopes list_accounts", &surfaces(&accounts));
+    }
+
+    #[test]
+    fn detect_does_not_treat_a_community_cli_home_as_official() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let empty_state = GrokCliAdapter::with_home(empty.path()).detect();
+
+        let community = tempfile::tempdir().expect("tempdir");
+        let dir = community.path().join(".grok");
+        fs::create_dir_all(&dir).expect("mkdir .grok");
+        fs::write(dir.join("grok.db"), b"").expect("grok.db");
+        fs::write(
+            dir.join("user-settings.json"),
+            r#"{"apiKey":"FAKE-community-api-key"}"#,
+        )
+        .expect("user-settings.json");
+        let community_state = GrokCliAdapter::with_home(community.path()).detect();
+        assert_eq!(
+            community_state, empty_state,
+            "community ~/.grok must not count as the official CLI"
+        );
+
+        let official = tempfile::tempdir().expect("tempdir");
+        write_auth(official.path(), "{}");
+        assert_eq!(
+            GrokCliAdapter::with_home(official.path()).detect(),
+            InstallState::Installed
+        );
     }
 
     #[test]
