@@ -159,10 +159,9 @@ impl ProviderAdapter for GeminiCliAdapter {
             masked_identity: mask_api_key(&key),
             auth_kind: AuthKind::ApiKey,
             // The environment variable is what the tool will use
-            // [verified-docs]. Unlike Grok, there is no selection among
-            // several identities whose active one is `[unknown]`; this is
-            // the only account this adapter can see, and it is the value
-            // the CLI reads. `is_active` is therefore `true`.
+            // [verified-docs]. This is the only account this adapter can
+            // see, and it is the value the CLI reads. `is_active` is
+            // therefore `true`.
             is_active: true,
             // GEMINI_API_KEY is the tool's environment, not a stored copy
             // this application created.
