@@ -1,5 +1,12 @@
-import { useEffect, useState, type ReactElement } from 'react'
+import {
+  Fragment,
+  useEffect,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from 'react'
 import AccountActions, {
+  Confirmation,
   accountDisplayName,
   type PendingKind,
 } from '@/components/AccountActions'
@@ -285,6 +292,7 @@ function listingBody({
           <DamagedLiveFileNote
             provider={provider}
             message={listing.outcome.error.message}
+            path={listing.outcome.error.path}
           />
           {listing.accounts.length > 0 ? (
             table(listing.accounts)
@@ -320,9 +328,11 @@ function listingBody({
 function DamagedLiveFileNote({
   provider,
   message,
+  path,
 }: {
   provider: ProviderDescriptor
   message: string
+  path: string | null
 }) {
   return (
     <div className="mt-3 rounded-md border border-border-subtle p-3 text-sm">
@@ -332,7 +342,7 @@ function DamagedLiveFileNote({
         stored copy over that file (behind a restorable backup) is the recovery
         path. This application will not rewrite a file it does not understand.
       </p>
-      <p className="mt-2 text-ink-muted">{message}</p>
+      <p className="mt-2 text-ink-muted">{textWithPath(message, path)}</p>
     </div>
   )
 }
@@ -370,11 +380,13 @@ function AccountTable({
 }) {
   const unknownActiveId = `${headingId}-unknown-active`
   const activeKnown = accounts.some((account) => account.isActive)
+  const showExpires = accounts.some(hasExpiry)
   const showActions = accounts.some(
     (account) =>
       (canSwitch && account.isStored && !account.isIncomplete) ||
       (canDelete && account.isStored),
   )
+  const columnCount = 4 + (showExpires ? 1 : 0) + (showActions ? 1 : 0)
 
   return (
     <>
@@ -383,15 +395,27 @@ function AccountTable({
           Active account is not known for this provider.
         </p>
       )}
-      <div className="mt-3 overflow-x-auto">
+      <div className="mt-3 w-0 min-w-full overflow-x-auto">
         <table
-          className="w-full text-left text-sm"
+          className={
+            showExpires
+              ? 'accounts-table has-expires text-left text-sm'
+              : 'accounts-table text-left text-sm'
+          }
           aria-labelledby={headingId}
           aria-describedby={activeKnown ? undefined : unknownActiveId}
         >
+          <colgroup>
+            <col className="col-label" />
+            <col className="col-identity" />
+            <col className="col-auth" />
+            <col className="col-status" />
+            {showExpires && <col className="col-expires" />}
+            {showActions && <col className="col-actions" />}
+          </colgroup>
           <thead className="text-xs uppercase tracking-wide text-ink-muted">
             <tr>
-              <th scope="col" className="py-2 pr-4">
+              <th scope="col" className="py-2 pr-4 pl-3">
                 Label
               </th>
               <th scope="col" className="py-2 pr-4">
@@ -400,12 +424,17 @@ function AccountTable({
               <th scope="col" className="py-2 pr-4">
                 Auth
               </th>
-              <th scope="col" className="py-2 pr-4">
+              <th
+                scope="col"
+                className={showExpires || showActions ? 'py-2 pr-4' : 'py-2'}
+              >
                 Status
               </th>
-              <th scope="col" className="py-2 pr-4">
-                Expires
-              </th>
+              {showExpires && (
+                <th scope="col" className={showActions ? 'py-2 pr-4' : 'py-2'}>
+                  Expires
+                </th>
+              )}
               {showActions && (
                 <th scope="col" className="py-2">
                   Actions
@@ -414,55 +443,134 @@ function AccountTable({
             </tr>
           </thead>
           <tbody>
-            {accounts.map((account) => (
-              <tr key={account.id} className="border-t border-border-subtle">
-                <th scope="row" className="py-2 pr-4 text-left font-medium">
-                  {presentOrAbsent(account.label, 'No label')}
-                </th>
-                <td className="py-2 pr-4 text-ink-muted">
-                  {account.isIncomplete
-                    ? 'No usable credential'
-                    : presentOrAbsent(
-                        account.maskedIdentity,
-                        'Not established',
-                      )}
-                </td>
-                <td className="py-2 pr-4 text-ink-muted">{account.authKind}</td>
-                <td className="py-2 pr-4 text-ink-muted">
-                  {statusLabel(account, activeKnown)}
-                </td>
-                <td
-                  className={
-                    showActions
-                      ? 'py-2 pr-4 text-ink-muted'
-                      : 'py-2 text-ink-muted'
-                  }
-                >
-                  {presentOrAbsent(account.expiresAt, 'Not established')}
-                </td>
-                {showActions && (
-                  <td className="py-2">
-                    <AccountActions
-                      account={account}
-                      provider={provider}
-                      canSwitch={
-                        canSwitch && account.isStored && !account.isIncomplete
+            {accounts.map((account) => {
+              const labelId = `${headingId}-label-${account.id}`
+              const rowId = `${headingId}-row-${account.id}`
+              const confirmId = `${headingId}-confirm-${account.id}`
+              const confirmRowId = `${headingId}-confirm-row-${account.id}`
+              const isPending =
+                pending !== null && pending.accountId === account.id
+              const pendingKind = isPending ? pending.kind : null
+
+              return (
+                <Fragment key={account.id}>
+                  <tr
+                    id={rowId}
+                    className={accountRowClass(account.isActive)}
+                    aria-owns={isPending ? confirmRowId : undefined}
+                    aria-describedby={isPending ? confirmId : undefined}
+                  >
+                    <th
+                      id={labelId}
+                      scope="row"
+                      className="py-2 pr-4 pl-3 text-left font-medium"
+                      title={
+                        account.label.trim() === '' ? undefined : account.label
                       }
-                      canDelete={canDelete && account.isStored}
-                      disabled={busy}
-                      pending={
-                        pending !== null && pending.accountId === account.id
-                          ? pending.kind
-                          : null
+                    >
+                      {presentOrAbsent(account.label, 'No label')}
+                    </th>
+                    <td className="py-2 pr-4 text-ink-muted">
+                      {account.isIncomplete
+                        ? 'No usable credential'
+                        : presentOrAbsent(
+                            account.maskedIdentity,
+                            'Not established',
+                          )}
+                    </td>
+                    <td className="py-2 pr-4 text-ink-muted">
+                      {account.authKind}
+                    </td>
+                    <td
+                      className={
+                        showExpires || showActions ? 'py-2 pr-4' : 'py-2'
                       }
-                      onRequest={(kind) => onRequest(account.id, kind)}
-                      onCancel={onCancelPending}
-                      onConfirm={onConfirmPending}
-                    />
-                  </td>
-                )}
-              </tr>
-            ))}
+                    >
+                      {statusCell(account, activeKnown)}
+                    </td>
+                    {showExpires && (
+                      <td
+                        className={
+                          showActions
+                            ? 'py-2 pr-4 text-ink-muted'
+                            : 'py-2 text-ink-muted'
+                        }
+                      >
+                        {formatExpiry(account.expiresAt)}
+                      </td>
+                    )}
+                    {showActions && (
+                      <td className="py-2">
+                        {pendingKind === null && (
+                          <AccountActions
+                            account={account}
+                            canSwitch={
+                              canSwitch &&
+                              account.isStored &&
+                              !account.isIncomplete
+                            }
+                            canDelete={canDelete && account.isStored}
+                            disabled={busy}
+                            onRequest={(kind) => onRequest(account.id, kind)}
+                          />
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                  {pendingKind !== null && pending !== null && (
+                    <tr
+                      id={confirmRowId}
+                      className="border-t border-border-subtle bg-surface-raised"
+                    >
+                      <td
+                        colSpan={columnCount}
+                        headers={labelId}
+                        className="py-3 pr-4 pl-3"
+                      >
+                        <Confirmation
+                          id={confirmId}
+                          label={
+                            pendingKind === 'switch'
+                              ? `Confirm switch to ${accountDisplayName(account)}`
+                              : `Confirm deletion of ${accountDisplayName(account)}`
+                          }
+                          confirmLabel={
+                            pendingKind === 'switch'
+                              ? `Confirm switch to ${accountDisplayName(account)}`
+                              : `Confirm deletion of ${accountDisplayName(account)}`
+                          }
+                          cancelLabel={
+                            pendingKind === 'switch'
+                              ? 'Cancel switch'
+                              : 'Cancel deletion'
+                          }
+                          disabled={busy}
+                          onCancel={onCancelPending}
+                          onConfirm={onConfirmPending}
+                        >
+                          {pendingKind === 'switch' ? (
+                            <>
+                              Switch {provider.displayName} to{' '}
+                              {accountDisplayName(account)}? This replaces the
+                              credential file in the tool&apos;s own home,
+                              behind a restorable backup. {provider.displayName}{' '}
+                              must not be running.
+                            </>
+                          ) : (
+                            <>
+                              Forget this application&apos;s stored copy of{' '}
+                              {accountDisplayName(account)}?{' '}
+                              {provider.displayName} is not signed out, and its
+                              own files are left untouched.
+                            </>
+                          )}
+                        </Confirmation>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
           </tbody>
         </table>
       </div>
@@ -494,21 +602,80 @@ function presentOrAbsent(
   return value
 }
 
+function hasExpiry(account: Account): boolean {
+  return account.expiresAt !== null && account.expiresAt.trim() !== ''
+}
+
+/**
+ * Render an expiry for a person, not a log. Unparseable values are shown
+ * as the adapter produced them — they may not be timestamps at all.
+ */
+function formatExpiry(value: string | null): ReactNode {
+  if (value === null || value.trim() === '') {
+    return <span className="text-ink-muted">Not established</span>
+  }
+  const parsed = Date.parse(value)
+  if (Number.isNaN(parsed)) {
+    return value
+  }
+  const readable = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(parsed))
+  return (
+    <time dateTime={value} title={value}>
+      {readable}
+    </time>
+  )
+}
+
+function accountRowClass(isActive: boolean): string {
+  if (isActive) {
+    return 'is-active border-t border-border-subtle'
+  }
+  return 'border-t border-border-subtle'
+}
+
 /**
  * Incomplete is a structural fact about the stored directory, not a
  * missing active-account probe. Say that first so a blank identity is
  * not the only clue. `isActive: false` on every complete row is still
  * not a negative check — only say "Active" when at least one row is
- * marked active.
+ * marked active. The word "Active" is the state, not the colour.
  */
-function statusLabel(account: Account, activeKnown: boolean): string {
+function statusCell(account: Account, activeKnown: boolean): ReactNode {
   if (account.isIncomplete) {
-    return 'Incomplete — sign-in never finished'
+    return (
+      <span className="text-ink-muted">
+        Incomplete — sign-in never finished
+      </span>
+    )
   }
   if (!activeKnown) {
-    return 'Not known'
+    return <span className="text-ink-muted">Not known</span>
   }
-  return account.isActive ? 'Active' : '—'
+  if (account.isActive) {
+    return (
+      <span className="inline-flex rounded-full border border-border-subtle bg-surface px-2 py-0.5 text-xs font-semibold text-ink">
+        Active
+      </span>
+    )
+  }
+  return <span className="text-ink-muted">—</span>
+}
+
+/** Embed a filesystem path as a path, not as wrapping prose. */
+function textWithPath(message: string, path: string | null): ReactNode {
+  if (path === null || path === '' || !message.includes(path)) {
+    return message
+  }
+  const pieces = message.split(path)
+  return pieces.map((piece, index) => (
+    <Fragment key={index}>
+      {index > 0 && <code className="fs-path">{path}</code>}
+      {piece}
+    </Fragment>
+  ))
 }
 
 function hasCapability(
