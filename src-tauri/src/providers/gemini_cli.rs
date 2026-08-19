@@ -166,6 +166,7 @@ impl ProviderAdapter for GeminiCliAdapter {
             // GEMINI_API_KEY is the tool's environment, not a stored copy
             // this application created.
             is_stored: false,
+            is_incomplete: false,
             // An API key has no observable expiry here.
             expires_at: None,
         }])

@@ -194,6 +194,7 @@ fn account_from_documents(
         // The on-disk identity lives in the tool's own home. This adapter
         // stores nothing, so mutating operations have nothing to act on.
         is_stored: false,
+        is_incomplete: false,
         expires_at,
     }
 }
