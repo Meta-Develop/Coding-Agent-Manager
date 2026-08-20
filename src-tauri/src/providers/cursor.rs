@@ -257,6 +257,7 @@ impl ProviderAdapter for CursorAdapter {
                 auth_kind: AuthKind::Unknown,
                 masked_identity,
                 is_active: true,
+                is_selected_for_launch: false,
                 is_stored: false,
                 is_incomplete: false,
                 expires_at: None,

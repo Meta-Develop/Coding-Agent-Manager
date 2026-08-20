@@ -14,9 +14,12 @@ export type AuthKind = 'oauth' | 'api-key' | 'unknown'
 /** Whether the local tool for a provider was detected on this machine. */
 export type InstallState = 'installed' | 'not-installed' | 'unknown'
 
-/** A mutating account operation an adapter actually implements. */
+/** An account/tool operation an adapter actually implements. */
 export type ProviderCapability =
-  'add-account' | 'switch-account' | 'delete-account'
+  | 'add-account'
+  | 'switch-account'
+  | 'delete-account'
+  | 'launch-tool'
 
 export interface ProviderDescriptor {
   id: ProviderId
@@ -27,7 +30,7 @@ export interface ProviderDescriptor {
   maturity: 'planned' | 'experimental' | 'supported'
   installState: InstallState
   /**
-   * Operations this adapter will honour. The Accounts page must not offer a
+   * Account/tool operations this adapter will honour. The Accounts page must not offer a
    * button that is missing here (NFR-8). `maturity` does not answer that.
    */
   capabilities: ProviderCapability[]
@@ -43,25 +46,51 @@ export interface Account {
   maskedIdentity: string | null
   authKind: AuthKind
   isActive: boolean
+  /** Selected only for the next app-owned launch, not globally active. */
+  isSelectedForLaunch: boolean
   /**
-   * Whether this application holds a stored copy that activate and delete
-   * can act on. Not a claim that the account is valid, current, or accepted
-   * by the vendor. An incomplete row is still stored: delete can remove
-   * the directory, but activate cannot use it.
+   * Whether this application owns durable account metadata or material that
+   * its core/adapter lifecycle can select or forget. Not a claim that the
+   * account is valid, current, or accepted by the vendor. An incomplete row
+   * may be forgotten but cannot be selected.
    */
   isStored: boolean
   /**
-   * True when this row is a managed directory that does not hold a usable
-   * vendor document (`auth.json` that is a JSON object).
+   * True when provisioning left a structurally incomplete stored account.
    *
-   * An incomplete row is an abandoned add, not someone's credentials. It
-   * is listed so the user can delete it rather than inferring that from a
-   * missing identity. It is never `isActive`. Completeness is structural:
-   * not a claim that a complete document is current or accepted by the
-   * vendor.
+   * It is listed so the user can recover or forget it. It is never active or
+   * selected for launch. Completeness is structural: not a claim that complete
+   * material is current or accepted by the vendor.
    */
   isIncomplete: boolean
   expiresAt: string | null
+}
+
+/** Durable lifecycle of application-owned, non-secret account metadata. */
+export type StoredAccountState = 'pending' | 'complete' | 'deleting'
+
+/** Non-secret kind of external material owned by a stored account. */
+export type StoredAccountMaterial = 'credential-store' | 'vendor-home'
+
+/**
+ * Non-secret metadata persisted by the Rust core. Credential references and
+ * values and derived paths never cross IPC.
+ */
+export interface StoredAccountMetadata {
+  id: string
+  providerId: ProviderId
+  label: string
+  authKind: AuthKind
+  state: StoredAccountState
+  material: StoredAccountMaterial
+  isSelected: boolean
+}
+
+/** Non-secret result of launching a selected provider account. */
+export interface LaunchedProcess {
+  providerId: ProviderId
+  accountId: string
+  processId: number
 }
 
 export interface QuotaSnapshot {

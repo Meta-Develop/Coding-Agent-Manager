@@ -25,23 +25,8 @@ pub mod router;
 pub mod storage;
 
 /// Start the desktop application.
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
-            commands::list_providers,
-            commands::list_accounts,
-            commands::add_account,
-            commands::activate_account,
-            commands::delete_account,
-            commands::list_quota,
-            commands::start_relay,
-            commands::stop_relay,
-            commands::relay_status,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running Coding Agent Manager");
+    commands::run();
 }
 
 #[cfg(test)]

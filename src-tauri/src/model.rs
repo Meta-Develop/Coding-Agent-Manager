@@ -36,7 +36,7 @@ pub enum Maturity {
     Supported,
 }
 
-/// A mutating account operation an adapter actually implements.
+/// An account/tool operation an adapter actually implements.
 ///
 /// `maturity` is too coarse for the Accounts page: an experimental adapter
 /// may still add, switch, or delete. The UI offers a button only when this
@@ -47,6 +47,8 @@ pub enum ProviderCapability {
     AddAccount,
     SwitchAccount,
     DeleteAccount,
+    /// Start the provider tool through an app-owned launch path.
+    LaunchTool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +60,7 @@ pub struct ProviderDescriptor {
     pub auth_kinds: Vec<AuthKind>,
     pub maturity: Maturity,
     pub install_state: InstallState,
+    /// Account/tool operations this adapter will honour (NFR-8).
     pub capabilities: Vec<ProviderCapability>,
 }
 
@@ -73,26 +76,79 @@ pub struct Account {
     pub masked_identity: Option<String>,
     pub auth_kind: AuthKind,
     pub is_active: bool,
-    /// Whether this application holds a stored copy that
-    /// `activate_account` and `delete_account` can act on.
+    /// Selected for the next app-owned environment-driven launch. This is not
+    /// a claim about the account used by tools started elsewhere.
+    #[serde(default)]
+    pub is_selected_for_launch: bool,
+    /// Whether this application owns durable account metadata or material that
+    /// its core/adapter lifecycle can select or forget.
     ///
     /// This is not a validity, currency, or vendor-acceptance signal.
-    /// A stored copy may be expired, unused, or rejected by the vendor.
-    /// An incomplete row is still stored: `delete_account` can remove
-    /// the directory, but `activate_account` cannot use it.
+    /// Stored material may be expired, unused, or rejected by the vendor. An
+    /// incomplete row is still stored and may be forgotten, but cannot be
+    /// selected for use.
     pub is_stored: bool,
-    /// True when this row is a managed directory that does not hold a
-    /// usable vendor document (`auth.json` that is a JSON object).
+    /// True when provisioning left a structurally incomplete stored account.
     ///
-    /// An incomplete row is an abandoned add, not someone's credentials.
-    /// It is listed so the user can delete it rather than inferring that
-    /// from a missing identity. It is never `is_active`. Completeness is
-    /// structural: this is not a claim that a complete document is
-    /// current or accepted by the vendor.
+    /// It is listed so the user can recover or forget it. It is never active or
+    /// selected for launch. Completeness is structural: this is not a claim
+    /// that complete material is current or accepted by the vendor.
     #[serde(default)]
     pub is_incomplete: bool,
     /// RFC 3339 timestamp, when the adapter can determine one.
     pub expires_at: Option<String>,
+}
+
+/// Durable lifecycle of application-owned account metadata.
+///
+/// `Pending` and `Deleting` are recovery records, not usable accounts. Only a
+/// `Complete` account may be selected for an environment-driven launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoredAccountState {
+    Pending,
+    Complete,
+    Deleting,
+}
+
+/// External material associated with durable account metadata.
+///
+/// Paths and credential references are derived inside the Rust core; only this
+/// non-secret classification is persisted or exposed over IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoredAccountMaterial {
+    CredentialStore,
+    VendorHome,
+}
+
+/// Non-secret metadata for an account managed by this application.
+///
+/// The credential reference is derived from `(provider_id, id)` inside the
+/// Rust core when needed. Neither the reference nor secret material is stored
+/// in this document or exposed over IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredAccountMetadata {
+    /// Assigned by this application, never by the vendor.
+    pub id: String,
+    pub provider_id: String,
+    /// User-chosen label. Must never contain a secret.
+    pub label: String,
+    pub auth_kind: AuthKind,
+    pub state: StoredAccountState,
+    pub material: StoredAccountMaterial,
+    /// At most one complete account per provider is selected.
+    pub is_selected: bool,
+}
+
+/// Non-secret result returned after the core starts a provider child.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchedProcess {
+    pub provider_id: String,
+    pub account_id: String,
+    pub process_id: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +304,10 @@ mod tests {
             serde_json::to_string(&ProviderCapability::DeleteAccount).unwrap(),
             r#""delete-account""#
         );
+        assert_eq!(
+            serde_json::to_string(&ProviderCapability::LaunchTool).unwrap(),
+            r#""launch-tool""#
+        );
     }
 
     #[test]
@@ -288,6 +348,7 @@ mod tests {
             masked_identity: Some("****0001".to_string()),
             auth_kind: AuthKind::OAuth,
             is_active: true,
+            is_selected_for_launch: false,
             is_stored: true,
             is_incomplete: false,
             expires_at: None,
@@ -301,6 +362,7 @@ mod tests {
                 "maskedIdentity": "****0001",
                 "authKind": "oauth",
                 "isActive": true,
+                "isSelectedForLaunch": false,
                 "isStored": true,
                 "isIncomplete": false,
                 "expiresAt": null
@@ -314,6 +376,7 @@ mod tests {
             masked_identity: Some("****0001".to_string()),
             auth_kind: AuthKind::OAuth,
             is_active: true,
+            is_selected_for_launch: false,
             is_stored: false,
             is_incomplete: false,
             expires_at: None,
@@ -327,6 +390,7 @@ mod tests {
                 "maskedIdentity": "****0001",
                 "authKind": "oauth",
                 "isActive": true,
+                "isSelectedForLaunch": false,
                 "isStored": false,
                 "isIncomplete": false,
                 "expiresAt": null
@@ -340,6 +404,7 @@ mod tests {
             masked_identity: None,
             auth_kind: AuthKind::Unknown,
             is_active: false,
+            is_selected_for_launch: false,
             is_stored: true,
             is_incomplete: true,
             expires_at: None,
@@ -353,6 +418,7 @@ mod tests {
                 "maskedIdentity": null,
                 "authKind": "unknown",
                 "isActive": false,
+                "isSelectedForLaunch": false,
                 "isStored": true,
                 "isIncomplete": true,
                 "expiresAt": null
@@ -377,6 +443,48 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&QuotaSource::Unknown).unwrap(),
             r#""unknown""#
+        );
+    }
+
+    #[test]
+    fn stored_account_metadata_wire_shape_is_non_secret() {
+        let account = StoredAccountMetadata {
+            id: "work".to_string(),
+            provider_id: "gemini-cli".to_string(),
+            label: "Work".to_string(),
+            auth_kind: AuthKind::ApiKey,
+            state: StoredAccountState::Complete,
+            material: StoredAccountMaterial::CredentialStore,
+            is_selected: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&account).unwrap(),
+            serde_json::json!({
+                "id": "work",
+                "providerId": "gemini-cli",
+                "label": "Work",
+                "authKind": "api-key",
+                "state": "complete",
+                "material": "credential-store",
+                "isSelected": true
+            })
+        );
+    }
+
+    #[test]
+    fn launched_process_wire_shape_is_non_secret() {
+        let process = LaunchedProcess {
+            provider_id: "gemini-cli".to_string(),
+            account_id: "work".to_string(),
+            process_id: 42,
+        };
+        assert_eq!(
+            serde_json::to_value(&process).unwrap(),
+            serde_json::json!({
+                "providerId": "gemini-cli",
+                "accountId": "work",
+                "processId": 42
+            })
         );
     }
 
