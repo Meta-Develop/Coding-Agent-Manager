@@ -7,7 +7,8 @@
 use crate::error::{Error, Result};
 use crate::model::{
     Account, AccountListError, AccountListErrorKind, AccountListOutcome, LaunchedProcess,
-    ProviderAccountList, ProviderDescriptor, QuotaSnapshot, RelayStatus,
+    ProviderAccountList, ProviderDescriptor, ProviderQuotaList, QuotaListError, QuotaListErrorKind,
+    QuotaListOutcome, QuotaSnapshot, RelayStatus,
 };
 use crate::providers;
 use crate::providers::codex_cli::CodexCliAdapter;
@@ -252,24 +253,109 @@ fn stored_account_registry() -> Result<StoredAccountRegistry> {
     ))
 }
 
-/// Quota snapshots from every adapter that publishes one.
+/// One honest quota result for every registered provider.
 ///
-/// Same swallow as the old `list_accounts`: a single adapter error is
-/// dropped and the rest still arrive. Left consistent-but-wrong rather than
-/// given the per-provider outcome shape, because every current adapter
-/// returns `Ok([])` from `quota()` and the dashboard still does not render
-/// quota (`FR-5`). When an adapter first returns a real quota error, this
-/// command should grow the same outcome contract as `list_accounts`. Silence
-/// would hide that decision.
+/// Empty adapter output is an explicit `no-signal`, while collection errors
+/// stay scoped to their provider. Snapshots are validated before IPC so an
+/// adapter contract violation can never become a visible number (FR-5, NFR-8).
 #[tauri::command]
-pub fn list_quota() -> Result<Vec<QuotaSnapshot>> {
-    let mut snapshots = Vec::new();
-    for adapter in providers::registry() {
-        if let Ok(found) = adapter.quota() {
-            snapshots.extend(found);
+pub fn list_quota() -> Vec<ProviderQuotaList> {
+    providers::registry()
+        .iter()
+        .map(|adapter| quota_listing_for(adapter.as_ref()))
+        .collect()
+}
+
+fn quota_listing_for(adapter: &dyn ProviderAdapter) -> ProviderQuotaList {
+    quota_listing_from_results(adapter.id(), adapter.quota(), adapter.plan_label())
+}
+
+fn quota_listing_from_results(
+    provider_id: &str,
+    snapshots: Result<Vec<QuotaSnapshot>>,
+    plan_label: Result<Option<String>>,
+) -> ProviderQuotaList {
+    let snapshots = match snapshots {
+        Ok(snapshots) => snapshots,
+        Err(error) => return failed_quota_listing(provider_id, quota_list_error(&error)),
+    };
+    let plan_label = match plan_label {
+        Ok(plan_label) => plan_label,
+        Err(error) => return failed_quota_listing(provider_id, quota_list_error(&error)),
+    };
+    if let Some(error) = invalid_snapshot_error(&snapshots) {
+        return failed_quota_listing(provider_id, error);
+    }
+    let outcome = if snapshots.is_empty() {
+        QuotaListOutcome::NoSignal
+    } else {
+        QuotaListOutcome::Available
+    };
+    ProviderQuotaList {
+        provider_id: provider_id.to_string(),
+        plan_label,
+        snapshots,
+        outcome,
+    }
+}
+
+fn invalid_snapshot_error(snapshots: &[QuotaSnapshot]) -> Option<QuotaListError> {
+    for snapshot in snapshots {
+        if !snapshot.utilization.is_finite() || !(0.0..=1.0).contains(&snapshot.utilization) {
+            return Some(QuotaListError {
+                kind: QuotaListErrorKind::InvalidSnapshot,
+                path: None,
+                message: "adapter returned quota utilization outside 0..=1".to_string(),
+            });
+        }
+        if !is_rfc3339(&snapshot.captured_at) {
+            return Some(QuotaListError {
+                kind: QuotaListErrorKind::InvalidSnapshot,
+                path: None,
+                message: "adapter returned quota with invalid capturedAt".to_string(),
+            });
+        }
+        if snapshot
+            .resets_at
+            .as_deref()
+            .is_some_and(|resets_at| !is_rfc3339(resets_at))
+        {
+            return Some(QuotaListError {
+                kind: QuotaListErrorKind::InvalidSnapshot,
+                path: None,
+                message: "adapter returned quota with invalid resetsAt".to_string(),
+            });
         }
     }
-    Ok(snapshots)
+    None
+}
+
+fn is_rfc3339(timestamp: &str) -> bool {
+    time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339).is_ok()
+}
+
+fn failed_quota_listing(provider_id: &str, error: QuotaListError) -> ProviderQuotaList {
+    ProviderQuotaList {
+        provider_id: provider_id.to_string(),
+        plan_label: None,
+        snapshots: Vec::new(),
+        outcome: QuotaListOutcome::Failed { error },
+    }
+}
+
+fn quota_list_error(error: &Error) -> QuotaListError {
+    match error {
+        Error::ConfigRead { reason, .. } => QuotaListError {
+            kind: QuotaListErrorKind::ConfigRead,
+            path: path_from_reason(reason),
+            message: error.to_string(),
+        },
+        _ => QuotaListError {
+            kind: QuotaListErrorKind::Other,
+            path: None,
+            message: error.to_string(),
+        },
+    }
 }
 
 /// Start the relay with its safe default loopback configuration.
@@ -316,7 +402,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Account, AuthKind};
+    use crate::model::{Account, AuthKind, QuotaSource};
 
     fn sample_account(provider_id: &str) -> Account {
         Account {
@@ -330,6 +416,18 @@ mod tests {
             is_stored: false,
             is_incomplete: false,
             expires_at: None,
+        }
+    }
+
+    fn sample_quota() -> QuotaSnapshot {
+        QuotaSnapshot {
+            account_id: "test-account".to_string(),
+            model: None,
+            utilization: 0.25,
+            window_label: Some("5 hours".to_string()),
+            resets_at: None,
+            captured_at: "2030-01-01T00:00:00Z".to_string(),
+            source: QuotaSource::LocalFile,
         }
     }
 
@@ -489,6 +587,112 @@ mod tests {
         ));
         assert_eq!(listings[1].accounts.len(), 1);
         assert_eq!(listings[1].outcome, AccountListOutcome::Listed);
+    }
+
+    #[test]
+    fn available_quota_preserves_sourced_snapshots() {
+        let listing = quota_listing_from_results(
+            "example",
+            Ok(vec![sample_quota()]),
+            Ok(Some("Example plan".to_string())),
+        );
+        assert_eq!(listing.outcome, QuotaListOutcome::Available);
+        assert_eq!(listing.plan_label.as_deref(), Some("Example plan"));
+        assert_eq!(listing.snapshots, vec![sample_quota()]);
+    }
+
+    #[test]
+    fn empty_quota_is_explicit_no_signal() {
+        let listing =
+            quota_listing_from_results("claude-code", Ok(Vec::new()), Ok(Some("pro".to_string())));
+        assert_eq!(listing.outcome, QuotaListOutcome::NoSignal);
+        assert_eq!(listing.plan_label.as_deref(), Some("pro"));
+        assert!(listing.snapshots.is_empty());
+    }
+
+    #[test]
+    fn quota_error_is_retained_and_clears_visible_data() {
+        let listing = quota_listing_from_results(
+            "codex-cli",
+            Err(Error::ConfigRead {
+                provider: "codex-cli".to_string(),
+                reason: "/tmp/cam-test/quota.json is not valid JSON".to_string(),
+            }),
+            Ok(None),
+        );
+        assert!(listing.snapshots.is_empty());
+        assert_eq!(listing.plan_label, None);
+        let QuotaListOutcome::Failed { error } = listing.outcome else {
+            panic!("expected failed quota outcome");
+        };
+        assert_eq!(error.kind, QuotaListErrorKind::ConfigRead);
+        assert_eq!(error.path.as_deref(), Some("/tmp/cam-test/quota.json"));
+    }
+
+    #[test]
+    fn plan_error_is_a_failed_quota_outcome() {
+        let listing = quota_listing_from_results(
+            "claude-code",
+            Ok(Vec::new()),
+            Err(Error::ConfigRead {
+                provider: "claude-code".to_string(),
+                reason: "/tmp/cam-test/.claude.json has malformed plan metadata".to_string(),
+            }),
+        );
+        assert!(listing.snapshots.is_empty());
+        assert_eq!(listing.plan_label, None);
+        assert!(matches!(
+            listing.outcome,
+            QuotaListOutcome::Failed {
+                error: QuotaListError {
+                    kind: QuotaListErrorKind::ConfigRead,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn invalid_quota_snapshot_becomes_failed_without_a_number() {
+        for utilization in [f32::NAN, f32::INFINITY, -0.01, 1.01] {
+            let mut snapshot = sample_quota();
+            snapshot.utilization = utilization;
+            let listing = quota_listing_from_results("example", Ok(vec![snapshot]), Ok(None));
+            assert!(listing.snapshots.is_empty());
+            assert!(matches!(
+                listing.outcome,
+                QuotaListOutcome::Failed {
+                    error: QuotaListError {
+                        kind: QuotaListErrorKind::InvalidSnapshot,
+                        ..
+                    }
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn invalid_quota_timestamps_become_failed() {
+        for (captured_at, resets_at) in [
+            ("", None),
+            ("not-a-timestamp", None),
+            ("2030-01-01T00:00:00Z", Some("tomorrow")),
+        ] {
+            let mut snapshot = sample_quota();
+            snapshot.captured_at = captured_at.to_string();
+            snapshot.resets_at = resets_at.map(str::to_string);
+            let listing = quota_listing_from_results("example", Ok(vec![snapshot]), Ok(None));
+            assert!(listing.snapshots.is_empty());
+            assert!(matches!(
+                listing.outcome,
+                QuotaListOutcome::Failed {
+                    error: QuotaListError {
+                        kind: QuotaListErrorKind::InvalidSnapshot,
+                        ..
+                    }
+                }
+            ));
+        }
     }
 
     #[test]

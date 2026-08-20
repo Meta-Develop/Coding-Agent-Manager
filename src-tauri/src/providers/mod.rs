@@ -231,6 +231,13 @@ pub trait ProviderAdapter: Send + Sync {
     fn quota(&self) -> Result<Vec<QuotaSnapshot>> {
         Ok(Vec::new())
     }
+
+    /// Optional non-secret plan label sourced independently of quota usage.
+    ///
+    /// A plan name never implies that a numeric quota signal exists.
+    fn plan_label(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Spawn an adapter-declared provider process for a selected account.

@@ -23,7 +23,7 @@ use super::{
 use crate::error::{Error, Result};
 use crate::model::{
     Account, AuthKind, InstallState, Maturity, ProviderCapability, ProviderDescriptor,
-    QuotaSnapshot, StoredAccountMaterial, StoredAccountMetadata, StoredAccountState,
+    StoredAccountMaterial, StoredAccountMetadata, StoredAccountState,
 };
 use crate::storage::Secret;
 
@@ -425,7 +425,9 @@ impl ProviderAdapter for GeminiCliAdapter {
         Err(Error::NotImplemented("gemini-cli::activate_account"))
     }
 
-    fn quota(&self) -> Result<Vec<QuotaSnapshot>> {
+    fn quota(&self) -> Result<Vec<crate::model::QuotaSnapshot>> {
+        // Published limits do not establish a local usage signal; none was
+        // observed (`docs/research/gemini-cli.md` section 6).
         Ok(Vec::new())
     }
 }
