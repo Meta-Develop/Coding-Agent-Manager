@@ -9,12 +9,13 @@ as load-bearing.
 
 Every factual claim carries exactly one marker:
 
-| Marker             | Means                                                                                                     |
-| ------------------ | --------------------------------------------------------------------------------------------------------- |
-| `[verified-local]` | Observed directly on a real installation. The note records the tool version and the OS.                   |
-| `[verified-docs]`  | Stated in official vendor documentation. The note cites the URL.                                          |
-| `[inferred]`       | Reasoned from other evidence, not directly confirmed. Safe to design around, never safe to write against. |
-| `[unknown]`        | Not established. Listed in the note's "Open questions" section.                                           |
+| Marker              | Means                                                                                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `[verified-local]`  | Observed directly on a real installation. The note records the tool version and the OS.                                                                |
+| `[verified-source]` | Observed in first-party source code at an immutable revision with exact source citations. This does not prove that a locally installed binary matches. |
+| `[verified-docs]`   | Stated in official vendor documentation. The note cites the URL.                                                                                       |
+| `[inferred]`        | Reasoned from other evidence, not directly confirmed. Safe to design around, never safe to write against.                                              |
+| `[unknown]`         | Not established. Listed in the note's "Open questions" section.                                                                                        |
 
 Rules:
 

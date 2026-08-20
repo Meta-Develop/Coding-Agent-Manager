@@ -11,17 +11,20 @@
 //!
 //! # Request translation
 //!
-//! [`translate`] is a pure function of `(from, to, body)` with no I/O
-//! (`docs/adr/0004`). It rewrites one JSON document. That is the right shape
-//! for a non-streaming request. Streaming *responses* are a sequence of events,
-//! not a body: a later `translate_event` (or similar) can consume them one at
-//! a time without this function buffering a whole stream
-//! (`docs/ARCHITECTURE.md` §6).
+//! [`translate_request`] is a pure body translator with explicit context for
+//! Gemini's URL-carried model and stream mode. [`translate_response`] maps
+//! non-streaming result envelopes. [`StreamTranslator`] consumes one decoded
+//! event at a time and retains only bounded protocol metadata, never generated
+//! content. Image-generation requests use [`translate_image_request`]. The
+//! smaller [`translate`] function remains a compatibility wrapper for callers
+//! that do not need Gemini URL metadata.
 //!
-//! This module implements the OpenAI Chat Completions ⇄ Anthropic Messages
-//! request pair. Gemini, OpenAI Responses, streaming, image generation
-//! (`FR-8`), and reasoning-budget mapping (`FR-9`) stay [`Error::NotImplemented`]
-//! or an explicit field rejection so they cannot pass through silently.
+//! When a target response schema requires envelope metadata absent from the
+//! source, translation uses deterministic relay-owned values: timestamp `0`
+//! and output-item ids derived from the source response id. These values carry
+//! no vendor claim and keep golden output stable. Cross-dialect streaming into
+//! OpenAI Responses is rejected because its final event requires the complete
+//! accumulated output, which this relay deliberately never buffers.
 //!
 //! ## Field buckets (`docs/ARCHITECTURE.md` §6)
 //!
@@ -63,11 +66,14 @@
 //! - OpenAI tool-message `name` → omitted. It repeats the function name
 //!   already bound to `tool_call_id` / `tool_use_id`.
 //!
+//! The detailed list below describes the strict Chat Completions ⇄ Anthropic
+//! request pair. Responses and Gemini use equivalent strict allowlists in
+//! `translate.rs`.
+//!
 //! **Rejected** (error names the field): everything else, including unknown
 //! keys (even when the value is JSON `null`), `n` ≠ 1, `logit_bias`,
 //! `presence_penalty`, `frequency_penalty`, `seed`, `logprobs`,
-//! `top_logprobs`, `top_k`, `thinking`, `reasoning`, `reasoning_effort`,
-//! `stream: true`, `service_tier`, `store`, OpenAI `metadata`, Anthropic
+//! `top_logprobs`, `top_k`, `service_tier`, `store`, OpenAI `metadata`, Anthropic
 //! `cache_control` / `container` / `mcp_servers`, `functions` /
 //! `function_call`, Anthropic `tool_result.is_error: true`, and a missing
 //! `max_tokens` when the target is Anthropic.
@@ -87,11 +93,27 @@ use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
 
+mod server;
+mod stream;
+mod translate;
+
+pub use server::{
+    relay_status, start_relay, start_routed_relay, stop_relay, AdapterQuotaSource, CoreTranslator,
+    RelayQuotaSource, RelayServer, RelayStreamTranslator, RelayTarget, RelayTranslator,
+    RelayUpstreamAuth, RoutedRelayTarget,
+};
+pub use stream::{SourceEvent, StreamTranslator, TranslatedEvent};
+pub use translate::{
+    translate_image_request, translate_image_response, translate_request, translate_response,
+    TranslatedRequest, TranslationContext,
+};
+
 /// Wire formats the relay can accept and emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireFormat {
     OpenAiChatCompletions,
     OpenAiResponses,
+    OpenAiImagesGenerations,
     AnthropicMessages,
     GeminiGenerateContent,
 }
@@ -101,6 +123,7 @@ impl WireFormat {
         match self {
             Self::OpenAiChatCompletions => "openai-chat-completions",
             Self::OpenAiResponses => "openai-responses",
+            Self::OpenAiImagesGenerations => "openai-images-generations",
             Self::AnthropicMessages => "anthropic-messages",
             Self::GeminiGenerateContent => "gemini-generate-content",
         }
@@ -108,7 +131,7 @@ impl WireFormat {
 }
 
 /// Runtime configuration for the relay listener.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RelayConfig {
     /// Defaults to `127.0.0.1`. Changing it requires an explicit opt-in.
     pub bind_address: String,
@@ -130,8 +153,18 @@ impl Default for RelayConfig {
 impl RelayConfig {
     /// Reject a configuration that would expose an unauthenticated listener.
     pub fn validate(&self) -> Result<()> {
-        let is_loopback = self.bind_address == "127.0.0.1" || self.bind_address == "::1";
-        if !is_loopback && self.auth_token.is_none() {
+        let address: std::net::IpAddr = self.bind_address.parse().map_err(|_| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "relay bind address must be an IP address",
+            ))
+        })?;
+        if !address.is_loopback()
+            && self
+                .auth_token
+                .as_deref()
+                .is_none_or(|token| token.trim().is_empty())
+        {
             return Err(Error::CredentialStoreUnavailable(
                 "a non-loopback relay binding requires an auth token".to_string(),
             ));
@@ -143,22 +176,26 @@ impl RelayConfig {
 /// Translate a request body between wire formats.
 ///
 /// Same-format calls parse the body (so malformed JSON still fails) and
-/// return the original bytes. Pairwise translation is implemented only for
-/// OpenAI Chat Completions ⇄ Anthropic Messages; every other pair is
-/// [`Error::NotImplemented`].
+/// return the original bytes. Cross-format Gemini calls require URL model
+/// metadata and therefore use [`translate_request`] instead.
 pub fn translate(from: WireFormat, to: WireFormat, body: &[u8]) -> Result<Vec<u8>> {
     if from == to {
         let _: Value = serde_json::from_slice(body)?;
         return Ok(body.to_vec());
     }
     match (from, to) {
-        (WireFormat::OpenAiChatCompletions, WireFormat::AnthropicMessages) => {
-            openai_chat_to_anthropic(body)
+        (WireFormat::OpenAiImagesGenerations, _) | (_, WireFormat::OpenAiImagesGenerations) => {
+            translate_image_request(from, to, TranslationContext::default(), body)
+                .map(|translated| translated.body)
         }
-        (WireFormat::AnthropicMessages, WireFormat::OpenAiChatCompletions) => {
-            anthropic_to_openai_chat(body)
+        (WireFormat::GeminiGenerateContent, _) | (_, WireFormat::GeminiGenerateContent) => {
+            Err(reject(
+                "target_model",
+                "Gemini carries the model in its URL; use relay::translate_request",
+            ))
         }
-        _ => Err(Error::NotImplemented("relay::translate")),
+        _ => translate_request(from, to, TranslationContext::default(), body)
+            .map(|translated| translated.body),
     }
 }
 
@@ -442,6 +479,7 @@ fn anthropic_to_openai_chat(body: &[u8]) -> Result<Vec<u8>> {
 fn convert_openai_messages(messages: &[Value]) -> Result<(Option<Value>, Vec<Value>)> {
     let mut system_parts: Vec<Value> = Vec::new();
     let mut out: Vec<Value> = Vec::new();
+    let mut saw_conversational_message = false;
 
     for (i, message) in messages.iter().enumerate() {
         let path = format!("messages[{i}]");
@@ -501,13 +539,21 @@ fn convert_openai_messages(messages: &[Value]) -> Result<(Option<Value>, Vec<Val
         let role = role.ok_or_else(|| reject(&format!("{path}.role"), "field is required"))?;
         match role {
             "system" | "developer" => {
+                if saw_conversational_message {
+                    return Err(reject(
+                        &format!("{path}.role"),
+                        "system and developer messages must precede conversational content",
+                    ));
+                }
                 push_system_parts(&mut system_parts, content, &path)?;
             }
             "user" => {
+                saw_conversational_message = true;
                 let converted = openai_content_to_anthropic(content, &path, false)?;
                 push_anthropic_message(&mut out, "user", converted);
             }
             "assistant" => {
+                saw_conversational_message = true;
                 let mut parts = match content {
                     None | Some(Value::Null) => Vec::new(),
                     Some(Value::String(text)) if text.is_empty() => Vec::new(),
@@ -540,6 +586,7 @@ fn convert_openai_messages(messages: &[Value]) -> Result<(Option<Value>, Vec<Val
                 push_anthropic_message(&mut out, "assistant", content);
             }
             "tool" => {
+                saw_conversational_message = true;
                 let id = tool_call_id
                     .ok_or_else(|| reject(&format!("{path}.tool_call_id"), "field is required"))?;
                 let body = match content {
@@ -1535,6 +1582,26 @@ mod tests {
     }
 
     #[test]
+    fn every_ipv4_and_ipv6_loopback_needs_no_token() {
+        for bind_address in ["127.0.0.2", "::1"] {
+            let config = RelayConfig {
+                bind_address: bind_address.to_string(),
+                ..RelayConfig::default()
+            };
+            assert!(config.validate().is_ok(), "{bind_address}");
+        }
+    }
+
+    #[test]
+    fn invalid_bind_address_is_rejected() {
+        let config = RelayConfig {
+            bind_address: "localhost".to_string(),
+            ..RelayConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn exposed_binding_without_token_is_rejected() {
         let config = RelayConfig {
             bind_address: "0.0.0.0".to_string(),
@@ -1547,9 +1614,21 @@ mod tests {
     fn exposed_binding_with_token_is_allowed() {
         let config = RelayConfig {
             bind_address: "0.0.0.0".to_string(),
-            auth_token: Some("token".to_string()),
+            auth_token: Some("FAKE-relay-auth-token".to_string()),
             ..RelayConfig::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn exposed_binding_with_blank_token_is_rejected() {
+        for auth_token in ["", "  "] {
+            let config = RelayConfig {
+                bind_address: "0.0.0.0".to_string(),
+                auth_token: Some(auth_token.to_string()),
+                ..RelayConfig::default()
+            };
+            assert!(config.validate().is_err(), "{auth_token:?}");
+        }
     }
 }

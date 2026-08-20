@@ -1,8 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  LaunchedProcess,
   ProviderAccountList,
   ProviderDescriptor,
-  QuotaSnapshot,
+  ProviderQuotaList,
+  RelayStatus,
+  RouteRule,
 } from '@/types'
 
 /**
@@ -24,10 +27,58 @@ export function listAccounts(
   })
 }
 
-export function activateAccount(accountId: string): Promise<void> {
-  return invoke<void>('activate_account', { accountId })
+export function addAccount(
+  providerId: string,
+  accountId: string,
+): Promise<void> {
+  return invoke<void>('add_account', { providerId, accountId })
 }
 
-export function listQuota(): Promise<QuotaSnapshot[]> {
-  return invoke<QuotaSnapshot[]>('list_quota')
+export function activateAccount(
+  providerId: string,
+  accountId: string,
+): Promise<void> {
+  return invoke<void>('activate_account', { providerId, accountId })
+}
+
+export function deleteAccount(
+  providerId: string,
+  accountId: string,
+): Promise<void> {
+  return invoke<void>('delete_account', { providerId, accountId })
+}
+
+/**
+ * Launches only the account already selected in Rust-owned metadata. Account
+ * ids, programs, arguments, environment names, paths, and secret values are
+ * deliberately absent from this IPC boundary.
+ */
+export function launchProvider(providerId: string): Promise<LaunchedProcess> {
+  return invoke<LaunchedProcess>('launch_provider', { providerId })
+}
+
+export function listQuota(): Promise<ProviderQuotaList[]> {
+  return invoke<ProviderQuotaList[]>('list_quota')
+}
+
+export function listRouteRules(): Promise<RouteRule[]> {
+  return invoke<RouteRule[]>('list_route_rules')
+}
+
+/** Atomically replaces the complete ordered routing-rule list. */
+export function replaceRouteRules(rules: RouteRule[]): Promise<void> {
+  return invoke<void>('replace_route_rules', { rules })
+}
+
+export function relayStatus(): Promise<RelayStatus> {
+  return invoke<RelayStatus>('relay_status')
+}
+
+/** Starts only the Rust core's safe default loopback configuration. */
+export function startRelay(): Promise<RelayStatus> {
+  return invoke<RelayStatus>('start_relay')
+}
+
+export function stopRelay(): Promise<RelayStatus> {
+  return invoke<RelayStatus>('stop_relay')
 }

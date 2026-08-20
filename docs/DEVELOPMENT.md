@@ -99,13 +99,16 @@ The layering rules and why they exist are in
    `ProviderAdapter`. Put every path claim in a doc comment with its marker.
 3. Register it in `providers::registry()`.
 4. Start with `detect()`, `config_paths()`, and `list_accounts()`. Leave
-   `activate_account()` returning `Error::NotImplemented` until the switching
-   mechanics are `[verified-local]` or `[verified-docs]`.
+   `add_account()`, `activate_account()`, and `delete_account()` returning
+   `Error::NotImplemented` until the switching mechanics are
+   `[verified-local]` or `[verified-docs]`. Advertise a capability only
+   when the matching method is implemented (`NFR-8`).
 5. Add fixtures under `src-tauri/tests/fixtures/<provider>/` and wire up the
    contract tests — see [`TESTING.md`](TESTING.md).
 6. Set `maturity` honestly: `planned` until it reads, `experimental` until it
    switches reliably, `supported` only after the contract tests pass on all
-   three platforms.
+   three platforms. Maturity is not the UI gate for add, switch, or
+   delete; `descriptor().capabilities` is.
 7. Update [`PROVIDER_MATRIX.md`](PROVIDER_MATRIX.md) and the README table.
 
 ## 6. Debugging
