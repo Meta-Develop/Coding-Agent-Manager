@@ -5,7 +5,7 @@
 //! adapter and streaming events can be translated without buffering a complete
 //! response.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -15,8 +15,8 @@ use std::time::Duration;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::header::{
-    AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING,
-    WWW_AUTHENTICATE,
+    AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, RETRY_AFTER,
+    TRANSFER_ENCODING, WWW_AUTHENTICATE,
 };
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
 use axum::routing::any;
@@ -25,6 +25,7 @@ use futures_util::stream::{self, Stream};
 use futures_util::StreamExt;
 use serde_json::json;
 use subtle::ConstantTimeEq;
+use time::{Duration as TimeDuration, OffsetDateTime};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
@@ -36,7 +37,11 @@ use super::{
     TranslationContext, WireFormat,
 };
 use crate::error::{Error, Result};
-use crate::model::RelayStatus;
+use crate::model::{
+    ProviderQuotaList, QuotaListError, QuotaListErrorKind, QuotaListOutcome, RelayStatus, RouteRule,
+};
+use crate::providers;
+use crate::router::{validate_rules, RouteAccount, RouteError, RouteSelection, RouterState};
 use crate::storage::Secret;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -58,7 +63,9 @@ const UPSTREAM_DIALECT_ENV: &str = "CODING_AGENT_MANAGER_RELAY_UPSTREAM_DIALECT"
 const UPSTREAM_MODEL_ENV: &str = "CODING_AGENT_MANAGER_RELAY_UPSTREAM_MODEL";
 const UPSTREAM_AUTH_HEADER_ENV: &str = "CODING_AGENT_MANAGER_RELAY_UPSTREAM_AUTH_HEADER";
 const UPSTREAM_AUTH_TOKEN_ENV: &str = "CODING_AGENT_MANAGER_RELAY_UPSTREAM_AUTH_TOKEN";
+const ROUTED_TARGET_ENV_PREFIX: &str = "CODING_AGENT_MANAGER_RELAY_TARGET_";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ROUTE_FALLBACK_THROTTLE: TimeDuration = TimeDuration::seconds(60);
 /// Translates the three independent protocol surfaces used by the transport.
 ///
 /// Streaming creates one bounded, metadata-only session per upstream response.
@@ -219,6 +226,90 @@ impl RelayTarget {
     }
 }
 
+/// One explicitly configured account target available to routing rules.
+///
+/// The account identity is non-secret, but the target can contain a credential,
+/// so this binding deliberately implements neither `Debug` nor `Serialize`.
+/// A rule selects the provider, and the router requires exactly one binding for
+/// that provider before any request can be sent.
+pub struct RoutedRelayTarget {
+    provider_id: String,
+    account_id: String,
+    target: Arc<RelayTarget>,
+}
+
+impl RoutedRelayTarget {
+    pub fn new(
+        provider_id: impl Into<String>,
+        account_id: impl Into<String>,
+        target: RelayTarget,
+    ) -> Result<Self> {
+        let provider_id = provider_id.into();
+        let account_id = account_id.into();
+        if provider_id.trim().is_empty() || account_id.trim().is_empty() {
+            return Err(relay_error(
+                "routed relay target provider and account ids must be nonempty",
+            ));
+        }
+        Ok(Self {
+            provider_id,
+            account_id,
+            target: Arc::new(target),
+        })
+    }
+}
+
+/// Supplies one secret-free M4 quota snapshot for a routed request.
+///
+/// Implementations must return provider outcomes rather than fabricate a
+/// utilization when no signal exists. The relay calls this exactly once per
+/// request and the router validates every numeric snapshot before using it.
+pub trait RelayQuotaSource: Send + Sync + 'static {
+    fn snapshot(&self) -> Vec<ProviderQuotaList>;
+}
+
+/// Production quota source backed by the compiled provider registry.
+pub struct AdapterQuotaSource;
+
+impl RelayQuotaSource for AdapterQuotaSource {
+    fn snapshot(&self) -> Vec<ProviderQuotaList> {
+        providers::registry()
+            .into_iter()
+            .map(|adapter| quota_listing(adapter.id(), adapter.quota()))
+            .collect()
+    }
+}
+
+fn quota_listing(
+    provider_id: &str,
+    result: Result<Vec<crate::model::QuotaSnapshot>>,
+) -> ProviderQuotaList {
+    match result {
+        Ok(snapshots) => ProviderQuotaList {
+            provider_id: provider_id.to_owned(),
+            plan_label: None,
+            outcome: if snapshots.is_empty() {
+                QuotaListOutcome::NoSignal
+            } else {
+                QuotaListOutcome::Available
+            },
+            snapshots,
+        },
+        Err(_) => ProviderQuotaList {
+            provider_id: provider_id.to_owned(),
+            plan_label: None,
+            snapshots: Vec::new(),
+            outcome: QuotaListOutcome::Failed {
+                error: QuotaListError {
+                    kind: QuotaListErrorKind::Other,
+                    path: None,
+                    message: "provider quota collection failed".to_owned(),
+                },
+            },
+        },
+    }
+}
+
 fn optional_environment_value(name: &str) -> Result<Option<String>> {
     match std::env::var(name) {
         Ok(value) => Ok(Some(value)),
@@ -298,8 +389,144 @@ fn parse_dialect(value: &str) -> Result<WireFormat> {
     }
 }
 
+fn routed_targets_from_environment(rules: &[RouteRule]) -> Result<Vec<RoutedRelayTarget>> {
+    let mut seen = HashSet::new();
+    let mut targets = Vec::new();
+    for rule in rules {
+        if !seen.insert(rule.provider_id.as_str()) {
+            continue;
+        }
+        let key = routed_environment_key(&rule.provider_id)?;
+        let name = |suffix: &str| format!("{ROUTED_TARGET_ENV_PREFIX}{key}_{suffix}");
+        let endpoint = optional_environment_value(&name("URL"))?;
+        let dialect = optional_environment_value(&name("DIALECT"))?;
+        let account_id = optional_environment_value(&name("ACCOUNT_ID"))?;
+        let auth_header = optional_environment_value(&name("AUTH_HEADER"))?;
+        let auth_token = optional_environment_value(&name("AUTH_TOKEN"))?;
+
+        if endpoint.is_none()
+            && dialect.is_none()
+            && account_id.is_none()
+            && auth_header.is_none()
+            && auth_token.is_none()
+        {
+            continue;
+        }
+        let (Some(endpoint), Some(dialect), Some(account_id)) = (endpoint, dialect, account_id)
+        else {
+            return Err(relay_error(
+                "routed relay target environment configuration is partial",
+            ));
+        };
+        if endpoint.is_empty() || dialect.is_empty() || account_id.trim().is_empty() {
+            return Err(relay_error(
+                "routed relay target environment configuration is incomplete",
+            ));
+        }
+
+        let target = RelayTarget::new(&endpoint, parse_dialect(&dialect)?)?;
+        let target = apply_environment_auth(target, auth_header, auth_token)?;
+        targets.push(RoutedRelayTarget::new(
+            rule.provider_id.clone(),
+            account_id,
+            target,
+        )?);
+    }
+    Ok(targets)
+}
+
+fn routed_environment_key(provider_id: &str) -> Result<String> {
+    if provider_id.len() > 64
+        || provider_id.is_empty()
+        || !provider_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(relay_error(
+            "routed relay provider id is not a supported environment key",
+        ));
+    }
+    Ok(provider_id.to_ascii_uppercase().replace('-', "_"))
+}
+
+fn route_configuration_error(error: RouteError) -> Error {
+    Error::Io(io::Error::new(io::ErrorKind::InvalidInput, error))
+}
+
+enum RelayRequestMode {
+    Fixed(Option<RelayTarget>),
+    Routed(RoutedServerState),
+}
+
+struct RoutedServerState {
+    rules: Vec<RouteRule>,
+    accounts: Vec<RouteAccount>,
+    targets: HashMap<(String, String), Arc<RelayTarget>>,
+    quota_source: Arc<dyn RelayQuotaSource>,
+    router: Mutex<RouterState>,
+}
+
+impl RoutedServerState {
+    fn new(
+        rules: Vec<RouteRule>,
+        targets: Vec<RoutedRelayTarget>,
+        quota_source: Arc<dyn RelayQuotaSource>,
+    ) -> Result<Self> {
+        validate_rules(&rules).map_err(route_configuration_error)?;
+
+        let mut providers = HashSet::new();
+        let mut accounts = Vec::with_capacity(targets.len());
+        let mut target_map = HashMap::with_capacity(targets.len());
+        for binding in targets {
+            if !providers.insert(binding.provider_id.clone()) {
+                return Err(relay_error(
+                    "routed relay target configuration is ambiguous",
+                ));
+            }
+            let account = RouteAccount {
+                provider_id: binding.provider_id,
+                account_id: binding.account_id,
+            };
+            target_map.insert(
+                (account.provider_id.clone(), account.account_id.clone()),
+                binding.target,
+            );
+            accounts.push(account);
+        }
+
+        if rules
+            .iter()
+            .any(|rule| !providers.contains(&rule.provider_id))
+        {
+            return Err(relay_error(
+                "a routed relay rule has no configured account target",
+            ));
+        }
+
+        Ok(Self {
+            rules,
+            accounts,
+            targets: target_map,
+            quota_source,
+            router: Mutex::new(RouterState::default()),
+        })
+    }
+
+    fn target(&self, selection: &RouteSelection) -> Option<Arc<RelayTarget>> {
+        self.targets
+            .get(&(selection.provider_id.clone(), selection.account_id.clone()))
+            .cloned()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelayModeKind {
+    Fixed,
+    Routed,
+}
+
 struct ServerState {
-    target: Option<RelayTarget>,
+    mode: RelayRequestMode,
     translator: Arc<dyn RelayTranslator>,
     client: reqwest::Client,
     relay_auth_token: Option<Secret>,
@@ -309,6 +536,7 @@ struct ServerState {
 /// ephemeral port; the desktop-facing functions below own one global instance.
 pub struct RelayServer {
     status: RelayStatus,
+    mode: RelayModeKind,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<Result<()>>,
 }
@@ -319,6 +547,43 @@ impl RelayServer {
         target: Option<RelayTarget>,
         translator: Arc<dyn RelayTranslator>,
     ) -> Result<Self> {
+        Self::start_with_mode(
+            config,
+            RelayRequestMode::Fixed(target),
+            RelayModeKind::Fixed,
+            translator,
+        )
+        .await
+    }
+
+    /// Start a listener whose upstream attempts come only from explicit rules.
+    ///
+    /// Every provider named by a rule must resolve to exactly one identity-
+    /// bearing target before the socket is bound. Extra targets are inert; they
+    /// cannot become an implicit fallback.
+    pub async fn start_routed(
+        config: RelayConfig,
+        rules: Vec<RouteRule>,
+        targets: Vec<RoutedRelayTarget>,
+        quota_source: Arc<dyn RelayQuotaSource>,
+        translator: Arc<dyn RelayTranslator>,
+    ) -> Result<Self> {
+        let routed = RoutedServerState::new(rules, targets, quota_source)?;
+        Self::start_with_mode(
+            config,
+            RelayRequestMode::Routed(routed),
+            RelayModeKind::Routed,
+            translator,
+        )
+        .await
+    }
+
+    async fn start_with_mode(
+        config: RelayConfig,
+        mode: RelayRequestMode,
+        mode_kind: RelayModeKind,
+        translator: Arc<dyn RelayTranslator>,
+    ) -> Result<Self> {
         let bind_address = validate_listener_config(&config)?;
         let listener = TcpListener::bind((bind_address, config.port)).await?;
         let local_address = listener.local_addr()?;
@@ -327,7 +592,7 @@ impl RelayServer {
             .build()
             .map_err(|_| relay_error("relay upstream client could not be initialized"))?;
         let state = Arc::new(ServerState {
-            target,
+            mode,
             translator,
             client,
             relay_auth_token: config.auth_token.map(String::into_bytes).map(Secret::new),
@@ -351,6 +616,7 @@ impl RelayServer {
                 port: local_address.port(),
                 prefixes: relay_prefixes(),
             },
+            mode: mode_kind,
             shutdown: Some(shutdown),
             task,
         })
@@ -407,7 +673,13 @@ pub async fn start_relay() -> Result<RelayStatus> {
     let mut relay = relay_instance().lock().await;
     if let Some(server) = relay.as_ref() {
         if !server.task.is_finished() {
-            return Ok(server.status());
+            return if server.mode == RelayModeKind::Fixed {
+                Ok(server.status())
+            } else {
+                Err(relay_error(
+                    "the relay must be stopped before changing routing mode",
+                ))
+            };
         }
     }
     if let Some(stopped) = relay.take() {
@@ -416,6 +688,38 @@ pub async fn start_relay() -> Result<RelayStatus> {
     let target = RelayTarget::from_environment()?;
     let server =
         RelayServer::start(RelayConfig::default(), target, Arc::new(CoreTranslator)).await?;
+    let status = server.status();
+    *relay = Some(server);
+    Ok(status)
+}
+
+/// Start the desktop-core relay in explicit rule-driven mode.
+///
+/// Targets are loaded only from provider-namespaced process environment
+/// configuration. The legacy singleton target variables are intentionally not
+/// consulted, so they can never become an implicit fallback.
+pub async fn start_routed_relay(rules: Vec<RouteRule>) -> Result<RelayStatus> {
+    let mut relay = relay_instance().lock().await;
+    if let Some(server) = relay.as_ref() {
+        if !server.task.is_finished() {
+            return Err(relay_error(
+                "the relay must be stopped before changing routed configuration",
+            ));
+        }
+    }
+    if let Some(stopped) = relay.take() {
+        drop(stopped);
+    }
+
+    let targets = routed_targets_from_environment(&rules)?;
+    let server = RelayServer::start_routed(
+        RelayConfig::default(),
+        rules,
+        targets,
+        Arc::new(AdapterQuotaSource),
+        Arc::new(CoreTranslator),
+    )
+    .await?;
     let status = server.status();
     *relay = Some(server);
     Ok(status)
@@ -488,7 +792,24 @@ async fn handle_request(State(state): State<Arc<ServerState>>, request: Request)
         Some(route) => route,
         None => return json_error(StatusCode::NOT_FOUND, "unknown relay path"),
     };
-    let Some(target) = state.target.as_ref() else {
+
+    match &state.mode {
+        RelayRequestMode::Fixed(target) => {
+            handle_fixed_request(&state, request, inbound, target.as_ref()).await
+        }
+        RelayRequestMode::Routed(routed) => {
+            handle_routed_request(&state, routed, request, inbound).await
+        }
+    }
+}
+
+async fn handle_fixed_request(
+    state: &ServerState,
+    request: Request,
+    inbound: InboundRoute,
+    target: Option<&RelayTarget>,
+) -> Response<Body> {
+    let Some(target) = target else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "relay target is not configured",
@@ -541,7 +862,135 @@ async fn handle_request(State(state): State<Arc<ServerState>>, request: Request)
         Ok(response) => response,
         Err(_) => return json_error(StatusCode::BAD_GATEWAY, "relay upstream request failed"),
     };
-    upstream_response(&state, inbound.dialect, target.dialect, upstream).await
+    upstream_response(state, inbound.dialect, target.dialect, upstream).await
+}
+
+async fn handle_routed_request(
+    state: &ServerState,
+    routed: &RoutedServerState,
+    request: Request,
+    inbound: InboundRoute,
+) -> Response<Body> {
+    let (parts, body) = request.into_parts();
+    let body = match to_bytes(body, MAX_REQUEST_BYTES).await {
+        Ok(body) => body,
+        Err(_) => {
+            return json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "relay request body is too large",
+            )
+        }
+    };
+    let inbound_model = match routed_inbound_model(&inbound, &body) {
+        Ok(model) => model,
+        Err(error) => return translation_error(error),
+    };
+    let quotas = routed.quota_source.snapshot();
+    let mut start_index = 0;
+    let mut last_rate_limit = None;
+
+    loop {
+        let now = OffsetDateTime::now_utc();
+        let selection = {
+            let mut router = routed.router.lock().await;
+            router.select_next(
+                &routed.rules,
+                &routed.accounts,
+                &quotas,
+                &inbound_model,
+                start_index,
+                now,
+            )
+        };
+        let selection = match selection {
+            Ok(selection) => selection,
+            Err(error) => {
+                return last_rate_limit.unwrap_or_else(|| routed_selection_error(error));
+            }
+        };
+        let Some(target) = routed.target(&selection) else {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "selected routing target is unavailable",
+            );
+        };
+
+        let translated = match state.translator.request(
+            inbound.dialect,
+            target.dialect,
+            TranslationContext {
+                source_model: inbound.source_model.as_deref(),
+                target_model: Some(&selection.target_model),
+                source_stream: inbound.source_stream,
+            },
+            &body,
+        ) {
+            Ok(translated) => translated,
+            Err(error) => return translation_error(error),
+        };
+        let endpoint = match upstream_endpoint(
+            &target,
+            translated.target_model.as_deref(),
+            translated.stream,
+        ) {
+            Ok(endpoint) => endpoint,
+            Err(error) => return translation_error(error),
+        };
+        let headers = routed_outbound_headers(&parts.headers, target.as_ref());
+        let upstream = match state
+            .client
+            .request(parts.method.clone(), endpoint)
+            .headers(headers)
+            .body(translated.body)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => return json_error(StatusCode::BAD_GATEWAY, "relay upstream request failed"),
+        };
+
+        if upstream.status() != StatusCode::TOO_MANY_REQUESTS {
+            return upstream_response(state, inbound.dialect, target.dialect, upstream).await;
+        }
+
+        let observed_at = OffsetDateTime::now_utc();
+        let deadline = rate_limit_deadline(upstream.headers(), &selection, observed_at);
+        let response = upstream_error(upstream.status(), upstream.headers());
+        {
+            let mut router = routed.router.lock().await;
+            router.record_rate_limit(&selection, deadline);
+        }
+        start_index = selection.rule_index.saturating_add(1);
+        last_rate_limit = Some(response);
+    }
+}
+
+fn routed_inbound_model(inbound: &InboundRoute, body: &[u8]) -> Result<String> {
+    if let Some(model) = inbound.source_model.as_deref() {
+        if !model.trim().is_empty() {
+            return Ok(model.to_owned());
+        }
+    } else if let Ok(serde_json::Value::Object(root)) = serde_json::from_slice(body) {
+        if let Some(model) = root
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+        {
+            return Ok(model.to_owned());
+        }
+    }
+    Err(relay_error(
+        "routed relay request must contain a nonempty model",
+    ))
+}
+
+fn routed_selection_error(error: RouteError) -> Response<Body> {
+    let status = if error == RouteError::UnmatchedModel {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    json_error(status, &error.to_string())
 }
 
 fn request_is_authorized(state: &ServerState, headers: &HeaderMap) -> bool {
@@ -679,6 +1128,45 @@ fn outbound_headers(
             .or_insert(HeaderValue::from_static(ANTHROPIC_VERSION));
     }
     outbound
+}
+
+fn routed_outbound_headers(inbound: &HeaderMap, target: &RelayTarget) -> HeaderMap {
+    let mut outbound = HeaderMap::new();
+    for (name, value) in inbound {
+        if is_hop_by_hop(name)
+            || name == HOST
+            || name == CONTENT_LENGTH
+            || is_routed_account_selector(name)
+        {
+            continue;
+        }
+        outbound.append(name.clone(), value.clone());
+    }
+    if let Some(auth) = &target.auth {
+        apply_upstream_auth(&mut outbound, auth);
+    }
+    outbound
+        .entry(CONTENT_TYPE)
+        .or_insert(HeaderValue::from_static("application/json"));
+    if target.dialect == WireFormat::AnthropicMessages {
+        outbound
+            .entry(HeaderName::from_static("anthropic-version"))
+            .or_insert(HeaderValue::from_static(ANTHROPIC_VERSION));
+    }
+    outbound
+}
+
+fn is_routed_account_selector(name: &HeaderName) -> bool {
+    is_vendor_auth_header(name)
+        || name == COOKIE
+        || name == "openai-organization"
+        || name == "openai-project"
+        || name == "anthropic-organization"
+        || name == "x-goog-user-project"
+        || name == "x-goog-quota-user"
+        || name == "x-goog-request-params"
+        || name == "x-organization-id"
+        || name == "x-project-id"
 }
 
 fn is_vendor_auth_header(name: &HeaderName) -> bool {
@@ -1011,6 +1499,29 @@ fn upstream_error(status: StatusCode, upstream_headers: &HeaderMap) -> Response<
     response
 }
 
+fn rate_limit_deadline(
+    headers: &HeaderMap,
+    selection: &RouteSelection,
+    observed_at: OffsetDateTime,
+) -> OffsetDateTime {
+    let retry_after = headers
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(|seconds| observed_at.checked_add(TimeDuration::seconds(seconds)));
+    let quota_reset = selection
+        .quota_resets_at
+        .filter(|reset| *reset > observed_at);
+
+    match (retry_after, quota_reset) {
+        (Some(retry_after), Some(quota_reset)) => retry_after.max(quota_reset),
+        (Some(retry_after), None) => retry_after,
+        (None, Some(quota_reset)) => quota_reset,
+        (None, None) => observed_at + ROUTE_FALLBACK_THROTTLE,
+    }
+}
+
 fn build_response(status: StatusCode, headers: HeaderMap, body: Body) -> Response<Body> {
     let mut response = Response::new(body);
     *response.status_mut() = status;
@@ -1205,6 +1716,40 @@ mod tests {
             Ok(_) => panic!("invalid credential header value was accepted"),
             Err(error) => assert!(!error.to_string().contains(secret)),
         }
+    }
+
+    #[test]
+    fn routed_rate_limit_deadline_uses_later_known_reset_and_explicit_fallback() {
+        let observed_at = OffsetDateTime::UNIX_EPOCH;
+        let mut selection = RouteSelection {
+            rule_index: 0,
+            provider_id: "provider-FAKE".to_owned(),
+            account_id: "account-FAKE".to_owned(),
+            target_model: "model-FAKE".to_owned(),
+            quota_resets_at: Some(observed_at + TimeDuration::seconds(90)),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("30"));
+        assert_eq!(
+            rate_limit_deadline(&headers, &selection, observed_at),
+            observed_at + TimeDuration::seconds(90),
+            "later M4 reset must win"
+        );
+
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("120"));
+        assert_eq!(
+            rate_limit_deadline(&headers, &selection, observed_at),
+            observed_at + TimeDuration::seconds(120),
+            "later Retry-After must win"
+        );
+
+        selection.quota_resets_at = None;
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("not-a-delay"));
+        assert_eq!(
+            rate_limit_deadline(&headers, &selection, observed_at),
+            observed_at + TimeDuration::seconds(60),
+            "unknown reset must use the documented conservative fallback"
+        );
     }
 
     #[tokio::test]

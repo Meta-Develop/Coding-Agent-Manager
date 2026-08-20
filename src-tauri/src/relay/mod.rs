@@ -98,8 +98,9 @@ mod stream;
 mod translate;
 
 pub use server::{
-    relay_status, start_relay, stop_relay, CoreTranslator, RelayServer, RelayStreamTranslator,
-    RelayTarget, RelayTranslator, RelayUpstreamAuth,
+    relay_status, start_relay, start_routed_relay, stop_relay, AdapterQuotaSource, CoreTranslator,
+    RelayQuotaSource, RelayServer, RelayStreamTranslator, RelayTarget, RelayTranslator,
+    RelayUpstreamAuth, RoutedRelayTarget,
 };
 pub use stream::{SourceEvent, StreamTranslator, TranslatedEvent};
 pub use translate::{
