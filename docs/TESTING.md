@@ -2,13 +2,13 @@
 
 ## 1. Strategy
 
-| Layer                | Tool                              | What it covers                                                                     |
-| -------------------- | --------------------------------- | ---------------------------------------------------------------------------------- |
-| Domain and core      | `cargo test`                      | Registry integrity, error mapping, relay config validation, router rule selection. |
-| Adapter contract     | `cargo test` over fixtures        | Every adapter behaves identically against a synthetic home directory.              |
-| Protocol translation | Golden files                      | OpenAI ⇄ Anthropic ⇄ Gemini request and response translation, including streaming. |
-| Front end            | `tsc --noEmit`, ESLint            | Type-level contract between `model.rs` and `types/index.ts`.                       |
-| End to end           | Manual checklist, later automated | Switch, verify, restore on a disposable machine profile.                           |
+| Layer                | Tool                               | What it covers                                                                                                           |
+| -------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Domain and core      | `cargo test`                       | Registry integrity, storage, launch selection, quota states, relay transport, and router behavior.                       |
+| Adapter contract     | `cargo test` over fixtures         | Every registry adapter follows the shared capability, mutation, path, and secret-leak rules.                             |
+| Protocol translation | 74 paired golden cases             | Requests, responses, errors, and supported streams across OpenAI, Anthropic, and Gemini dialects.                        |
+| Front end            | TypeScript, ESLint, Vitest + jsdom | Rust/TypeScript contract plus component behavior for Accounts and Dashboard.                                             |
+| End to end           | Local fake acceptance tests        | Launch environments and routed relay behavior without real credentials. Real-vendor account proof remains a manual gate. |
 
 ## 2. Contract tests
 
@@ -20,30 +20,33 @@ The contract asserts:
 
 - `id()` is stable, kebab-case, and unique across the registry.
 - `descriptor().maturity` is not `supported` unless `list_accounts()` succeeds.
-- `descriptor().capabilities` matches whether `add_account`,
-  `activate_account`, and `delete_account` return `NotImplemented`
-  (`NFR-8`). The probe id is not a safe path component, so an
-  implementation refuses before creating a directory, writing the live
-  home, or spawning the vendor CLI.
-- `config_paths()` returns absolute paths and never panics when `$HOME` is
-  unset or unusual.
+- `descriptor().capabilities` matches the implemented legacy or managed
+  lifecycle path for add, switch, delete, and launch (`NFR-8`). The probe id is
+  not a safe path component, so an implementation refuses before creating a
+  directory, writing the live home, resolving a credential, or spawning the
+  vendor CLI.
+- `config_paths()` returns absolute paths for empty, spaced, and nonexistent
+  injected roots. The production `$HOME`-unset path is explicitly not tested
+  because mutating the process environment would race parallel tests.
 - `detect()` is side-effect free: running it twice leaves the fixture home byte
   for byte identical.
 - `list_accounts()` never returns a field containing a value that appears in the
   fixture's secret material. This is the automated form of `NFR-1`.
-- `activate_account()` is implemented or returns exactly
-  `NotImplemented`. An unimplemented adapter writes nothing to the
-  fixture home. Backup-before-write and restore-on-failure (`NFR-4`) are
-  proven in the Codex CLI adapter unit tests, not yet in this shared
-  body.
+- A refused legacy `activate_account()` leaves the fixture tree unchanged.
+  Launch-environment selection is covered through `managed_account_plan()` and
+  `launch_spec()` because those adapters intentionally leave direct activation
+  unimplemented. Backup-before-write and restore-on-failure (`NFR-4`) are
+  proven in the Codex CLI adapter unit tests, not in this shared body.
 
 ## 3. Fixtures
 
 ```text
 src-tauri/tests/fixtures/<provider>/
-  home/                 synthetic $HOME tree the adapter sees
-  expected/accounts.json  what list_accounts() must return
-  expected/after-switch/  the tree after a successful switch
+  home/                   synthetic $HOME tree the adapter sees
+  expected/accounts.json expected list_accounts() result
+
+src-tauri/tests/fixtures/{gemini,grok,quota}/
+  ...                     feature-specific synthetic configuration trees
 ```
 
 Fixture rules:
@@ -75,10 +78,24 @@ src-tauri/tests/golden/<from>-to-<to>/
   NNN-<case>.expected.json
 ```
 
-Cases must cover: a plain chat turn, a system prompt, multi-part content, tool
-definitions and tool calls, a streaming sequence event by event, an image
-request, a reasoning-budget field, and a field with no counterpart in the target
-dialect — which must produce an explicit error, never a silent drop.
+The harness currently exercises 74 paired input/expected cases. It covers all
+12 ordered non-streaming text-format request and response pairs, supported
+streaming sequences, OpenAI Images to and from Gemini, reasoning mapping, and
+fields with no counterpart. Errors name the rejected field rather than silently
+dropping it.
+
+Streaming goldens also pin the implemented boundaries: cross-dialect OpenAI
+Responses targets are rejected, cross-dialect streaming request sources from
+OpenAI Responses are rejected, and Gemini-target tool-call streams that would
+require partial argument accumulation are rejected. Listener tests cover both
+Gemini `generateContent` paths and `streamGenerateContent` paths. At runtime,
+after response headers are sent, a streaming translation failure terminates as
+a generic transport failure rather than a field-specific HTTP response.
+
+The relay uses `storage::Secret` only as its in-memory secret representation;
+it does not call `CredentialStore`. Transport tests therefore construct only
+obvious fake runtime tokens and assert that routed client credential and account
+headers are stripped before target authentication is applied.
 
 ## 6. Coverage expectations
 
@@ -87,10 +104,20 @@ dialect — which must produce an explicit error, never a silent drop.
   user their login. Codex CLI `add_account` is covered in that adapter's
   unit tests (fresh directory, vendor-login failure cleanup, no live-home
   mutation).
-- UI: type checking and lint. The Accounts page is no longer a
-  placeholder. Component tests are still not required.
+- UI: type checking, lint, and component tests. Accounts and Dashboard tests
+  cover capability-gated actions, launch-selection state, and distinct quota
+  no-signal/failure rendering.
+- Router and routed relay Rust tests: local fake targets prove case-sensitive
+  exact and trailing-`*` selection, fail-closed quota gates, one account per
+  selected provider, explicit unmatched errors, HTTP-429-only fallback,
+  throttle deadlines, credential stripping, persistence, and persisted-rule
+  activation. There is no Router component test.
 - A pull request adding a write path without a test for its failure-and-restore
   case does not get merged.
+
+The real coding-agent-through-relay check is deliberately not part of CI because
+it requires real provider accounts. It remains an M5 exit-criterion check on a
+disposable account setup.
 
 ## 7. Running
 
@@ -98,9 +125,14 @@ dialect — which must produce an explicit error, never a silent drop.
 nix develop        # on NixOS
 npm run typecheck
 npm run lint
-npm run rust:test
-npm run rust:clippy
+npm run format:check
+npm test
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-CI runs the same commands on Linux, macOS, and Windows — see
+CI runs npm type checking, lint, and format checking on Ubuntu. It runs Rust
+format checking, Clippy, and tests on Linux, macOS, and Windows. Vitest is not
+currently invoked by CI. See
 [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml).
