@@ -9,11 +9,19 @@
 //! ```
 //!
 //! `<from>` and `<to>` are the kebab-case [`WireFormat`] names:
-//! `openai-chat-completions`, `anthropic-messages`.
+//! `openai-chat-completions`, `openai-responses`,
+//! `openai-images-generations`, `anthropic-messages`, and
+//! `gemini-generate-content`.
 //!
 //! # Success vs error cases
 //!
-//! A success case's `expected.json` is the translated request body.
+//! A legacy success case's `expected.json` is the translated request body.
+//! New request cases use `{ "$body": ..., "$context": ... }` and compare the
+//! full `TranslatedRequest` envelope (`body`, `target_model`, and `stream`).
+//! Non-streaming response cases use `{ "$response": ... }`. Streaming cases
+//! use `{ "$events": [...] }` and compare the output event sequence exactly.
+//! Because response traffic runs opposite the request directory, an end-to-end
+//! stream case can add `{ "$stream": { "from": "...", "to": "..." } }`.
 //!
 //! An error case uses the same pair of files. `expected.json` is exactly:
 //!
@@ -29,17 +37,18 @@
 //! A mismatch prints the pair, the case name, every disagreeing JSON path,
 //! and the expected vs actual values at that path.
 //!
-//! # Later M5 cases
-//!
-//! These directories will grow. Streaming event sequences, image-generation
-//! requests (`FR-8`), reasoning-budget fields (`FR-9`), Gemini, and OpenAI
-//! Responses are deliberately absent here.
+//! The matrix covers all three vendor dialects, both OpenAI text endpoints,
+//! request and response envelopes, event-by-event streams, image generation,
+//! exact reasoning mappings, and explicit capability-mismatch errors.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use coding_agent_manager_lib::relay::{translate, WireFormat};
-use serde_json::Value;
+use coding_agent_manager_lib::relay::{
+    translate, translate_request, translate_response, SourceEvent, StreamTranslator,
+    TranslationContext, WireFormat,
+};
+use serde_json::{json, Value};
 
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden");
 
@@ -156,6 +165,7 @@ fn parse_format(name: &str) -> Option<WireFormat> {
     match name {
         "openai-chat-completions" => Some(WireFormat::OpenAiChatCompletions),
         "openai-responses" => Some(WireFormat::OpenAiResponses),
+        "openai-images-generations" => Some(WireFormat::OpenAiImagesGenerations),
         "anthropic-messages" => Some(WireFormat::AnthropicMessages),
         "gemini-generate-content" => Some(WireFormat::GeminiGenerateContent),
         _ => None,
@@ -167,14 +177,16 @@ fn run_case(pair: &str, from: WireFormat, to: WireFormat, case: &Case) {
     let input = fs::read(&case.input).unwrap_or_else(|e| {
         panic!("{label}: read {}: {e}", case.input.display());
     });
+    let input_value: Value = serde_json::from_slice(&input)
+        .unwrap_or_else(|error| panic!("{label}: input is not JSON: {error}"));
     let expected: Value = read_json(&case.expected, &label);
 
     if let Some(field) = error_mentions(&expected) {
-        match translate(from, to, &input) {
+        match execute_case(from, to, &input, &input_value) {
             Ok(actual) => panic!(
                 "{label}: expected a rejection mentioning `{field}`, \
                  but translate succeeded:\n{}",
-                preview_bytes(&actual)
+                pretty(&actual)
             ),
             Err(error) => {
                 let message = error.to_string();
@@ -187,14 +199,8 @@ fn run_case(pair: &str, from: WireFormat, to: WireFormat, case: &Case) {
         return;
     }
 
-    let actual_bytes = translate(from, to, &input).unwrap_or_else(|error| {
+    let actual = execute_case(from, to, &input, &input_value).unwrap_or_else(|error| {
         panic!("{label}: expected a translated body, got error: {error}");
-    });
-    let actual: Value = serde_json::from_slice(&actual_bytes).unwrap_or_else(|error| {
-        panic!(
-            "{label}: translate returned non-JSON ({error}):\n{}",
-            preview_bytes(&actual_bytes)
-        );
     });
 
     if actual != expected {
@@ -209,21 +215,146 @@ fn run_case(pair: &str, from: WireFormat, to: WireFormat, case: &Case) {
     }
 }
 
+fn execute_case(
+    from: WireFormat,
+    to: WireFormat,
+    raw: &[u8],
+    input: &Value,
+) -> coding_agent_manager_lib::error::Result<Value> {
+    let Some(obj) = input.as_object() else {
+        let body = translate(from, to, raw)?;
+        return Ok(serde_json::from_slice(&body)?);
+    };
+    if let Some(events) = obj.get("$events") {
+        let (stream_from, stream_to) = stream_formats(obj, from, to)?;
+        return execute_stream(stream_from, stream_to, events);
+    }
+    if let Some(response) = obj.get("$response") {
+        let body = serde_json::to_vec(response)?;
+        return Ok(serde_json::from_slice(&translate_response(
+            from, to, &body,
+        )?)?);
+    }
+    let Some(body) = obj.get("$body") else {
+        let body = translate(from, to, raw)?;
+        return Ok(serde_json::from_slice(&body)?);
+    };
+    let context = obj.get("$context").and_then(Value::as_object);
+    let source_model = context
+        .and_then(|context| context.get("source_model"))
+        .and_then(Value::as_str);
+    let target_model = context
+        .and_then(|context| context.get("target_model"))
+        .and_then(Value::as_str);
+    let source_stream = context
+        .and_then(|context| context.get("source_stream"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let translated = translate_request(
+        from,
+        to,
+        TranslationContext {
+            source_model,
+            target_model,
+            source_stream,
+        },
+        &serde_json::to_vec(body)?,
+    )?;
+    Ok(json!({
+        "body": serde_json::from_slice::<Value>(&translated.body)?,
+        "target_model": translated.target_model,
+        "stream": translated.stream,
+    }))
+}
+
+fn stream_formats(
+    fixture: &serde_json::Map<String, Value>,
+    default_from: WireFormat,
+    default_to: WireFormat,
+) -> coding_agent_manager_lib::error::Result<(WireFormat, WireFormat)> {
+    let Some(stream) = fixture.get("$stream") else {
+        return Ok((default_from, default_to));
+    };
+    let stream = stream
+        .as_object()
+        .ok_or_else(|| fixture_error("$stream must be an object"))?;
+    let from = stream
+        .get("from")
+        .and_then(Value::as_str)
+        .and_then(parse_format)
+        .ok_or_else(|| fixture_error("$stream.from must be a known wire format"))?;
+    let to = stream
+        .get("to")
+        .and_then(Value::as_str)
+        .and_then(parse_format)
+        .ok_or_else(|| fixture_error("$stream.to must be a known wire format"))?;
+    Ok((from, to))
+}
+
+fn execute_stream(
+    from: WireFormat,
+    to: WireFormat,
+    events: &Value,
+) -> coding_agent_manager_lib::error::Result<Value> {
+    let mut translator = StreamTranslator::new(from, to);
+    let mut out = Vec::new();
+    for event in events
+        .as_array()
+        .ok_or_else(|| fixture_error("$events must be an array"))?
+    {
+        let event = event
+            .as_object()
+            .ok_or_else(|| fixture_error("each $events entry must be an object"))?;
+        let event_name = event.get("event_name").and_then(Value::as_str);
+        let terminal = event
+            .get("terminal")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let data = match event.get("data") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::String(value)) => value.as_bytes().to_vec(),
+            Some(value) => serde_json::to_vec(value)?,
+        };
+        for translated in translator.translate(SourceEvent {
+            event_name,
+            data: &data,
+            terminal,
+        })? {
+            let data = if translated.data.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(&translated.data).unwrap_or_else(|_| {
+                    Value::String(String::from_utf8_lossy(&translated.data).into())
+                })
+            };
+            out.push(json!({
+                "event_name": translated.event_name,
+                "data": data,
+                "terminal": translated.terminal,
+            }));
+        }
+    }
+    Ok(Value::Array(out))
+}
+
+fn fixture_error(message: &str) -> coding_agent_manager_lib::error::Error {
+    coding_agent_manager_lib::error::Error::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message,
+    ))
+}
+
 /// `{ "error": { "mentions": "<field>" } }` is the error-case envelope.
 ///
-/// Anything else is treated as a translated body. A half-formed envelope
-/// (an `error` object that is not exactly that shape) fails the fixture
-/// itself so a typo cannot silently become a success case.
+/// Anything else is treated as a translated body. This exact-shape check is
+/// important because a valid OpenAI Responses envelope itself has an `error`
+/// field alongside its other fields. A sole, half-formed `error` envelope
+/// still fails the fixture so a typo cannot silently become a success case.
 fn error_mentions(expected: &Value) -> Option<&str> {
     let obj = expected.as_object()?;
-    if !obj.contains_key("error") {
+    if obj.len() != 1 || !obj.contains_key("error") {
         return None;
     }
-    assert!(
-        obj.len() == 1,
-        "error expected.json must contain only the `error` key, got {}",
-        pretty(expected)
-    );
     let error = obj
         .get("error")
         .and_then(Value::as_object)
@@ -291,8 +422,4 @@ fn read_json(path: &Path, label: &str) -> Value {
 
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-}
-
-fn preview_bytes(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
 }
