@@ -1,14 +1,32 @@
-//! Public M6 router-core contract tests. No network or vendor process is used.
+//! Public M6 router and relay contract tests. Network tests use loopback fakes;
+//! no vendor endpoint or process is used.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+
+use axum::body::{to_bytes, Body};
+use axum::extract::{Request, State};
+use axum::http::{Response, StatusCode};
+use axum::routing::any;
+use axum::Router as AxumRouter;
 
 use coding_agent_manager_lib::model::{
     ProviderQuotaList, QuotaListError, QuotaListErrorKind, QuotaListOutcome, QuotaSnapshot,
     QuotaSource, RouteRule,
 };
+use coding_agent_manager_lib::relay::{
+    CoreTranslator, RelayConfig, RelayQuotaSource, RelayServer, RelayTarget, RelayUpstreamAuth,
+    RoutedRelayTarget, WireFormat,
+};
 use coding_agent_manager_lib::router::{
     validate_rules, RouteAccount, RouteError, RouteRuleField, RouterState,
 };
+use coding_agent_manager_lib::storage::Secret;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 fn timestamp(value: &str) -> OffsetDateTime {
     OffsetDateTime::parse(value, &Rfc3339).expect("test timestamp")
@@ -424,4 +442,542 @@ fn rate_limit_deadline_updates_monotonically() {
         router.throttle_until("provider-a", "account-a"),
         Some(later)
     );
+}
+
+#[derive(Clone)]
+struct StaticQuotaSource {
+    quotas: Vec<ProviderQuotaList>,
+}
+
+impl RelayQuotaSource for StaticQuotaSource {
+    fn snapshot(&self) -> Vec<ProviderQuotaList> {
+        self.quotas.clone()
+    }
+}
+
+#[derive(Clone)]
+struct FakeUpstreamState {
+    name: &'static str,
+    status: StatusCode,
+    retry_after: Option<&'static str>,
+    requests: Arc<StdMutex<Vec<CapturedRequest>>>,
+    order: Arc<StdMutex<Vec<String>>>,
+}
+
+#[derive(Debug)]
+struct CapturedRequest {
+    headers: HashMap<String, String>,
+    body: serde_json::Value,
+}
+
+struct FakeUpstream {
+    url: String,
+    requests: Arc<StdMutex<Vec<CapturedRequest>>>,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl FakeUpstream {
+    async fn start(
+        name: &'static str,
+        status: StatusCode,
+        retry_after: Option<&'static str>,
+        order: Arc<StdMutex<Vec<String>>>,
+    ) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake upstream");
+        let address = listener.local_addr().expect("fake upstream address");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let state = FakeUpstreamState {
+            name,
+            status,
+            retry_after,
+            requests: Arc::clone(&requests),
+            order,
+        };
+        let app = AxumRouter::new()
+            .fallback(any(capture_upstream_request))
+            .with_state(state);
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve fake upstream");
+        });
+        Self {
+            url: format!("http://{address}/"),
+            requests,
+            shutdown: Some(shutdown),
+            task,
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.requests.lock().expect("captured requests").len()
+    }
+
+    async fn stop(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        self.task.await.expect("join fake upstream");
+    }
+}
+
+async fn capture_upstream_request(
+    State(state): State<FakeUpstreamState>,
+    request: Request,
+) -> Response<Body> {
+    let mut headers = HashMap::new();
+    for name in [
+        "authorization",
+        "x-api-key",
+        "x-goog-api-key",
+        "openai-organization",
+        "openai-project",
+        "x-goog-user-project",
+        "cookie",
+    ] {
+        if let Some(value) = request.headers().get(name) {
+            headers.insert(
+                name.to_owned(),
+                value.to_str().expect("fake header value").to_owned(),
+            );
+        }
+    }
+    let body = to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .expect("read fake request");
+    let body = serde_json::from_slice(&body).expect("fake request JSON");
+    state
+        .requests
+        .lock()
+        .expect("captured requests")
+        .push(CapturedRequest { headers, body });
+    state
+        .order
+        .lock()
+        .expect("request order")
+        .push(state.name.to_owned());
+
+    let mut builder = Response::builder()
+        .status(state.status)
+        .header("content-type", "application/json");
+    if let Some(retry_after) = state.retry_after {
+        builder = builder.header("retry-after", retry_after);
+    }
+    builder
+        .body(Body::from(format!(r#"{{"servedBy":"{}"}}"#, state.name)))
+        .expect("fake response")
+}
+
+fn ephemeral_relay() -> RelayConfig {
+    RelayConfig {
+        bind_address: "127.0.0.1".to_owned(),
+        port: 0,
+        auth_token: None,
+    }
+}
+
+fn routed_target(
+    provider_id: &str,
+    account_id: &str,
+    upstream: &FakeUpstream,
+    dialect: WireFormat,
+    token: &str,
+) -> RoutedRelayTarget {
+    let target = RelayTarget::new(&upstream.url, dialect)
+        .expect("relay target")
+        .with_auth(RelayUpstreamAuth::bearer(Secret::new(
+            token.as_bytes().to_vec(),
+        )))
+        .expect("relay target auth");
+    RoutedRelayTarget::new(provider_id, account_id, target).expect("routed target")
+}
+
+fn quota_source() -> Arc<dyn RelayQuotaSource> {
+    Arc::new(StaticQuotaSource { quotas: Vec::new() })
+}
+
+async fn start_routed_server(
+    rules: Vec<RouteRule>,
+    targets: Vec<RoutedRelayTarget>,
+) -> RelayServer {
+    RelayServer::start_routed(
+        ephemeral_relay(),
+        rules,
+        targets,
+        quota_source(),
+        Arc::new(CoreTranslator),
+    )
+    .await
+    .expect("start routed relay")
+}
+
+async fn routed_request(port: u16, model: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .header("authorization", "Bearer FAKE-client-authorization")
+        .header("x-api-key", "FAKE-client-x-api-key")
+        .header("x-goog-api-key", "FAKE-client-google-api-key")
+        .header("openai-organization", "FAKE-client-organization")
+        .header("openai-project", "FAKE-client-project")
+        .header("x-goog-user-project", "FAKE-client-google-project")
+        .header("cookie", "session=FAKE-client-cookie")
+        .header("content-type", "application/json")
+        .body(
+            serde_json::to_vec(&serde_json::json!({
+                "model": model,
+                "messages": [{ "role": "user", "content": "FAKE-prompt" }]
+            }))
+            .expect("request JSON"),
+        )
+        .send()
+        .await
+        .expect("send routed request")
+}
+
+#[tokio::test]
+async fn routed_first_success_uses_only_its_selected_account_and_credential() {
+    let order = Arc::new(StdMutex::new(Vec::new()));
+    let first = FakeUpstream::start("first", StatusCode::OK, None, Arc::clone(&order)).await;
+    let later = FakeUpstream::start("later", StatusCode::OK, None, Arc::clone(&order)).await;
+    let unrelated =
+        FakeUpstream::start("unrelated", StatusCode::OK, None, Arc::clone(&order)).await;
+    let server = start_routed_server(
+        vec![
+            rule("client-model", "provider-a", "target-a"),
+            rule("client-model", "provider-b", "target-b"),
+        ],
+        vec![
+            routed_target(
+                "provider-a",
+                "account-a",
+                &first,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-a",
+            ),
+            routed_target(
+                "provider-b",
+                "account-b",
+                &later,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-b",
+            ),
+            routed_target(
+                "provider-unrelated",
+                "account-unrelated",
+                &unrelated,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-unrelated",
+            ),
+        ],
+    )
+    .await;
+
+    let response = routed_request(server.status().port, "client-model").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(order.lock().expect("request order").as_slice(), ["first"]);
+    assert_eq!(later.count(), 0);
+    assert_eq!(unrelated.count(), 0);
+
+    {
+        let requests = first.requests.lock().expect("first requests");
+        let captured = requests.first().expect("selected request");
+        assert_eq!(
+            captured.headers.get("authorization").map(String::as_str),
+            Some("Bearer FAKE-selected-a")
+        );
+        for stripped in [
+            "x-api-key",
+            "x-goog-api-key",
+            "openai-organization",
+            "openai-project",
+            "x-goog-user-project",
+            "cookie",
+        ] {
+            assert!(
+                !captured.headers.contains_key(stripped),
+                "forwarded {stripped}"
+            );
+        }
+        assert_eq!(captured.body["model"], "target-a");
+    }
+
+    server.stop().await.expect("stop relay");
+    first.stop().await;
+    later.stop().await;
+    unrelated.stop().await;
+}
+
+#[tokio::test]
+async fn routed_429_fails_over_then_immediately_skips_the_throttled_account() {
+    let order = Arc::new(StdMutex::new(Vec::new()));
+    let limited = FakeUpstream::start(
+        "limited",
+        StatusCode::TOO_MANY_REQUESTS,
+        Some("120"),
+        Arc::clone(&order),
+    )
+    .await;
+    let fallback = FakeUpstream::start("fallback", StatusCode::OK, None, Arc::clone(&order)).await;
+    let server = start_routed_server(
+        vec![
+            rule("client-model", "provider-a", "target-a"),
+            rule("client-model", "provider-b", "target-b"),
+        ],
+        vec![
+            routed_target(
+                "provider-a",
+                "account-a",
+                &limited,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-a",
+            ),
+            routed_target(
+                "provider-b",
+                "account-b",
+                &fallback,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-b",
+            ),
+        ],
+    )
+    .await;
+
+    let first = routed_request(server.status().port, "client-model").await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = routed_request(server.status().port, "client-model").await;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(
+        order.lock().expect("request order").as_slice(),
+        ["limited", "fallback", "fallback"]
+    );
+    assert_eq!(limited.count(), 1);
+    assert_eq!(fallback.count(), 2);
+
+    server.stop().await.expect("stop relay");
+    limited.stop().await;
+    fallback.stop().await;
+}
+
+#[tokio::test]
+async fn routed_exhaustion_after_rate_limit_returns_the_sanitized_429() {
+    let order = Arc::new(StdMutex::new(Vec::new()));
+    let limited = FakeUpstream::start(
+        "limited",
+        StatusCode::TOO_MANY_REQUESTS,
+        Some("75"),
+        Arc::clone(&order),
+    )
+    .await;
+    let server = start_routed_server(
+        vec![rule("client-model", "provider-a", "target-a")],
+        vec![routed_target(
+            "provider-a",
+            "account-a",
+            &limited,
+            WireFormat::OpenAiChatCompletions,
+            "FAKE-selected-a",
+        )],
+    )
+    .await;
+
+    let response = routed_request(server.status().port, "client-model").await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers().get("retry-after").unwrap(), "75");
+    let body = response.text().await.expect("sanitized rate-limit body");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).expect("rate-limit JSON"),
+        serde_json::json!({ "error": { "message": "relay upstream returned an error" } })
+    );
+    assert!(!body.contains("FAKE-"));
+    assert_eq!(order.lock().expect("request order").as_slice(), ["limited"]);
+
+    server.stop().await.expect("stop relay");
+    limited.stop().await;
+}
+
+#[tokio::test]
+async fn routed_unmatched_request_contacts_no_selected_or_unrelated_target() {
+    let order = Arc::new(StdMutex::new(Vec::new()));
+    let selected = FakeUpstream::start("selected", StatusCode::OK, None, Arc::clone(&order)).await;
+    let unrelated =
+        FakeUpstream::start("unrelated", StatusCode::OK, None, Arc::clone(&order)).await;
+    let server = start_routed_server(
+        vec![rule("known-model", "provider-a", "target-a")],
+        vec![
+            routed_target(
+                "provider-a",
+                "account-a",
+                &selected,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-a",
+            ),
+            routed_target(
+                "provider-unrelated",
+                "account-unrelated",
+                &unrelated,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-unrelated",
+            ),
+        ],
+    )
+    .await;
+
+    let response = routed_request(server.status().port, "unknown-model").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(order.lock().expect("request order").is_empty());
+    assert_eq!(selected.count(), 0);
+    assert_eq!(unrelated.count(), 0);
+
+    server.stop().await.expect("stop relay");
+    selected.stop().await;
+    unrelated.stop().await;
+}
+
+#[tokio::test]
+async fn routed_non_rate_limit_failure_never_contacts_a_later_rule() {
+    let order = Arc::new(StdMutex::new(Vec::new()));
+    let failed = FakeUpstream::start(
+        "failed",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        None,
+        Arc::clone(&order),
+    )
+    .await;
+    let fallback = FakeUpstream::start("fallback", StatusCode::OK, None, Arc::clone(&order)).await;
+    let server = start_routed_server(
+        vec![
+            rule("client-model", "provider-a", "target-a"),
+            rule("client-model", "provider-b", "target-b"),
+        ],
+        vec![
+            routed_target(
+                "provider-a",
+                "account-a",
+                &failed,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-a",
+            ),
+            routed_target(
+                "provider-b",
+                "account-b",
+                &fallback,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-b",
+            ),
+        ],
+    )
+    .await;
+
+    let response = routed_request(server.status().port, "client-model").await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(order.lock().expect("request order").as_slice(), ["failed"]);
+    assert_eq!(fallback.count(), 0);
+
+    server.stop().await.expect("stop relay");
+    failed.stop().await;
+    fallback.stop().await;
+}
+
+#[tokio::test]
+async fn routed_translation_failure_never_contacts_a_later_rule() {
+    let order = Arc::new(StdMutex::new(Vec::new()));
+    let incompatible =
+        FakeUpstream::start("incompatible", StatusCode::OK, None, Arc::clone(&order)).await;
+    let fallback = FakeUpstream::start("fallback", StatusCode::OK, None, Arc::clone(&order)).await;
+    let server = start_routed_server(
+        vec![
+            rule("client-model", "provider-a", "target-a"),
+            rule("client-model", "provider-b", "target-b"),
+        ],
+        vec![
+            routed_target(
+                "provider-a",
+                "account-a",
+                &incompatible,
+                WireFormat::AnthropicMessages,
+                "FAKE-selected-a",
+            ),
+            routed_target(
+                "provider-b",
+                "account-b",
+                &fallback,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-b",
+            ),
+        ],
+    )
+    .await;
+
+    let response = routed_request(server.status().port, "client-model").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(order.lock().expect("request order").is_empty());
+    assert_eq!(incompatible.count(), 0);
+    assert_eq!(fallback.count(), 0);
+
+    server.stop().await.expect("stop relay");
+    incompatible.stop().await;
+    fallback.stop().await;
+}
+
+#[tokio::test]
+async fn routed_missing_or_ambiguous_target_catalog_is_rejected_before_bind() {
+    let order = Arc::new(StdMutex::new(Vec::new()));
+    let available =
+        FakeUpstream::start("available", StatusCode::OK, None, Arc::clone(&order)).await;
+    let rules = vec![
+        rule("client-model", "provider-missing", "target-missing"),
+        rule("client-model", "provider-b", "target-b"),
+    ];
+    let missing = RelayServer::start_routed(
+        ephemeral_relay(),
+        rules,
+        vec![routed_target(
+            "provider-b",
+            "account-b",
+            &available,
+            WireFormat::OpenAiChatCompletions,
+            "FAKE-selected-b",
+        )],
+        quota_source(),
+        Arc::new(CoreTranslator),
+    )
+    .await;
+    assert!(missing.is_err());
+
+    let duplicate_rules = vec![rule("client-model", "provider-b", "target-b")];
+    let ambiguous = RelayServer::start_routed(
+        ephemeral_relay(),
+        duplicate_rules,
+        vec![
+            routed_target(
+                "provider-b",
+                "account-b-one",
+                &available,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-b-one",
+            ),
+            routed_target(
+                "provider-b",
+                "account-b-two",
+                &available,
+                WireFormat::OpenAiChatCompletions,
+                "FAKE-selected-b-two",
+            ),
+        ],
+        quota_source(),
+        Arc::new(CoreTranslator),
+    )
+    .await;
+    assert!(ambiguous.is_err());
+    assert_eq!(available.count(), 0);
+    assert!(order.lock().expect("request order").is_empty());
+
+    available.stop().await;
 }
