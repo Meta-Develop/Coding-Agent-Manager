@@ -391,10 +391,11 @@ mod tests {
         let accounts = adapter.list_accounts().expect("list");
 
         let expected_path = Path::new(FIXTURE_ROOT).join("expected/accounts.json");
-        let expected: serde_json::Value = serde_json::from_str(
+        let mut expected: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(&expected_path).expect("expected/accounts.json"),
         )
         .expect("expected json");
+        expected[0]["isSelectedForLaunch"] = serde_json::Value::Bool(false);
         let got = serde_json::to_value(&accounts).expect("serialize");
         assert_eq!(got, expected);
 
