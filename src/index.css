@@ -38,3 +38,84 @@ body {
     'Noto Sans JP',
     sans-serif;
 }
+
+/*
+ * Shared Accounts column system. Tracks are fluid: Label, Identity, and
+ * Status share leftover space from the same mins whether or not Expires
+ * is present. Auth and Actions shrink-wrap nowrap content so the two
+ * action buttons stay side by side. Expires stacks a nowrap date above
+ * a nowrap time so the column is only as wide as the date. The table
+ * fills its container; the wrapper — not the page — scrolls
+ * horizontally, and only when the window is near the 900px minimum.
+ */
+.accounts-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.accounts-table .col-label,
+.accounts-table .col-identity {
+  min-width: 5.5rem;
+}
+
+.accounts-table .col-auth {
+  width: 1%;
+  min-width: 4.5rem;
+}
+
+.accounts-table .col-status {
+  min-width: 6rem;
+}
+
+.accounts-table .col-expires {
+  width: 1%;
+  min-width: 6.5rem;
+}
+
+.accounts-table .col-actions {
+  width: 1%;
+}
+
+.accounts-table th,
+.accounts-table td {
+  vertical-align: middle;
+  hyphens: none;
+  overflow-wrap: normal;
+}
+
+.accounts-table thead th {
+  white-space: nowrap;
+}
+
+.accounts-table tbody tr.is-active {
+  background-color: var(--color-surface-raised);
+  box-shadow: inset 3px 0 0 var(--color-ink);
+}
+
+.accounts-table tbody th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+/*
+ * Date and time on separate nowrap lines so Expires is only as wide as
+ * the date, not the concatenated "Sep 21, 2026, 11:00 PM" string.
+ */
+.accounts-table .expiry {
+  display: flex;
+  flex-direction: column;
+}
+
+.accounts-table .expiry > span {
+  white-space: nowrap;
+}
+
+.fs-path {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  hyphens: none;
+}

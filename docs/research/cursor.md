@@ -54,16 +54,47 @@ No token, key, or session field appears anywhere in it.
 
 ## 4. Authentication flow
 
-`[unknown]`. Since no credential file was found in either config location, the
+- `cursor-agent login` uses a browser authentication flow. The documentation
+  does not identify its protocol, so the adapter reports that path as
+  `AuthKind::Unknown` `[verified-docs]`.
+- The CLI also accepts an API key through `CURSOR_API_KEY` or `--api-key`
+  `[verified-docs]`.
+- `cursor-agent status` reports whether the CLI is authenticated, account
+  information, and the current endpoint configuration `[verified-docs]`.
+- Cursor says browser-login credentials are stored securely and locally, but
+  does not identify the store `[verified-docs]`.
+
+Official sources checked on 2026-08-20:
+
+- <https://docs.cursor.com/en/cli/reference/authentication>
+- <https://docs.cursor.com/en/cli/reference/parameters>
+
+Since no credential file was found in either observed config location, the
 session most plausibly lives in the OS keyring or inside the editor's Electron
 storage (`Local Storage`, `Network/Cookies`, or a `Local State`-encrypted blob)
 `[inferred]`.
 
 ## 5. Account switching mechanics
 
-`[unknown]`, and deliberately so. Until the store is found, the Cursor adapter
-must remain **read-only**: it may detect the installation and list config paths,
-and it must not implement `activate_account`.
+Read-only CLI account discovery does not require the credential path:
+`cursor-agent status` is the vendor-documented account-status surface
+`[verified-docs]`. The two checked official pages do not specify a stable
+machine-readable schema `[verified-docs]`. The adapter recognizes the inferred
+text markers `Logged in as`, `Logged in`, `Login successful!`, `not
+authenticated`, `authentication required`, and `not logged in` `[inferred]`.
+An unfamiliar response is a read error, not evidence that the user is logged
+out. If an authenticated response
+contains an email after `Logged in as`, the adapter masks it before returning a
+single active, unstored CLI account. It otherwise returns the same account with
+no display identity and `AuthKind::Unknown` `[inferred]`.
+
+This path lists only the CLI identity. Whether the editor and CLI authenticate
+independently remains `[unknown]`, so an editor installation without
+`cursor-agent` has no evidence-backed account source.
+
+Switching is `[unknown]`, and deliberately so. Until the store is found, the
+Cursor adapter must remain **read-only** and must not implement
+`activate_account`.
 
 This is a design position, not a gap to be filled by guessing. Writing a switch
 against an unverified credential store is the single most likely way this
@@ -86,10 +117,15 @@ schema was not inspected; it tracks code attribution rather than quota
   be infeasible without reimplementing that encryption — which would be both
   brittle and ethically questionable.
 - Editor and CLI may authenticate independently. Both need establishing.
+- The human-readable `status` format may change. Unknown output must fail closed
+  instead of being treated as a logged-out account `[inferred]`.
 
 ## 9. Open questions
 
-- Where does `cursor-agent login` persist its session? This blocks everything else.
+- Where does `cursor-agent login` persist its session? This blocks switching.
 - Do the editor and the CLI share one credential?
 - Does a keyring entry exist, and under what service name?
 - Is there a supported multi-account mechanism already?
+- Does `cursor-agent status` offer a documented machine-readable output mode?
+- Does `cursor-agent status` make a network request when local authentication
+  state is sufficient?
