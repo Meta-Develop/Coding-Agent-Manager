@@ -16,10 +16,7 @@ export type InstallState = 'installed' | 'not-installed' | 'unknown'
 
 /** An account/tool operation an adapter actually implements. */
 export type ProviderCapability =
-  | 'add-account'
-  | 'switch-account'
-  | 'delete-account'
-  | 'launch-tool'
+  'add-account' | 'switch-account' | 'delete-account' | 'launch-tool'
 
 export interface ProviderDescriptor {
   id: ProviderId
