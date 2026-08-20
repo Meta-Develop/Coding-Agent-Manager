@@ -931,6 +931,7 @@ pub(crate) fn process_named_is_running(name: &str) -> Result<bool> {
 ///
 /// Substring matches are rejected: `codex-helper` is not `codex`. `comm`
 /// is Linux's 15-character process name; `codex` fits.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn process_name_matches(name: &str, comm: &str, argv0: &str) -> bool {
     if comm == name {
         return true;

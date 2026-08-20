@@ -310,6 +310,7 @@ fn validate_directory(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn metadata_identity_matches(
     left: &fs::Metadata,
     right: &fs::Metadata,
@@ -321,18 +322,6 @@ fn metadata_identity_matches(
         let _ = label;
         Ok((left.dev(), left.ino()) == (right.dev(), right.ino()))
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        let left_identity = (left.volume_serial_number(), left.file_index());
-        let right_identity = (right.volume_serial_number(), right.file_index());
-        if left_identity.0.is_none() || left_identity.1.is_none() {
-            return Err(config_write(format!(
-                "{label} identity is unavailable on this volume"
-            )));
-        }
-        Ok(left_identity == right_identity)
-    }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (left, right);
@@ -340,6 +329,26 @@ fn metadata_identity_matches(
             "{label} identity cannot be verified on this platform"
         )))
     }
+}
+
+#[cfg(windows)]
+fn file_identity_matches_path(file: &File, path: &Path, label: &str) -> Result<bool> {
+    let file_identity = file
+        .try_clone()
+        .and_then(same_file::Handle::from_file)
+        .map_err(|error| {
+            config_write(format!(
+                "{label} identity cannot be read ({})",
+                error.kind()
+            ))
+        })?;
+    let path_identity = same_file::Handle::from_path(path).map_err(|error| {
+        config_write(format!(
+            "{label} identity cannot be rechecked ({})",
+            error.kind()
+        ))
+    })?;
+    Ok(file_identity == path_identity)
 }
 
 fn ensure_private_managed_home(data_dir: &Path, home: &Path) -> Result<()> {
@@ -548,6 +557,7 @@ struct ActiveSession {
 
 enum PidState {
     Live,
+    #[cfg(target_os = "linux")]
     Dead,
     Unknown,
 }
@@ -626,6 +636,7 @@ fn check_active_sessions(home: &Path) -> Result<()> {
                     "a Grok session recorded for this home is still active",
                 ))
             }
+            #[cfg(target_os = "linux")]
             PidState::Dead => {}
             PidState::Unknown => {
                 return Err(config_write(
@@ -645,13 +656,19 @@ fn validate_open_file_identity(file: &File, path: &Path, label: &str) -> Result<
             "{label} is not a regular non-symlink file"
         )));
     }
-    let handle_metadata = file.metadata().map_err(|error| {
-        config_write(format!(
-            "{label} identity cannot be read ({})",
-            error.kind()
-        ))
-    })?;
-    if !metadata_identity_matches(&path_metadata, &handle_metadata, label)? {
+    #[cfg(not(windows))]
+    let identity_matches = {
+        let handle_metadata = file.metadata().map_err(|error| {
+            config_write(format!(
+                "{label} identity cannot be read ({})",
+                error.kind()
+            ))
+        })?;
+        metadata_identity_matches(&path_metadata, &handle_metadata, label)?
+    };
+    #[cfg(windows)]
+    let identity_matches = file_identity_matches_path(file, path, label)?;
+    if !identity_matches {
         return Err(config_write(format!(
             "{label} was replaced during validation"
         )));
@@ -745,13 +762,19 @@ impl ExistingFileLock {
         if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
             return Err(config_write(format!("{label} changed while locked")));
         }
-        let handle_metadata = self.file.metadata().map_err(|error| {
-            config_write(format!(
-                "{label} identity cannot be read ({})",
-                error.kind()
-            ))
-        })?;
-        if !metadata_identity_matches(&path_metadata, &handle_metadata, label)? {
+        #[cfg(not(windows))]
+        let identity_matches = {
+            let handle_metadata = self.file.metadata().map_err(|error| {
+                config_write(format!(
+                    "{label} identity cannot be read ({})",
+                    error.kind()
+                ))
+            })?;
+            metadata_identity_matches(&path_metadata, &handle_metadata, label)?
+        };
+        #[cfg(windows)]
+        let identity_matches = file_identity_matches_path(&self.file, &self.path, label)?;
+        if !identity_matches {
             return Err(config_write(format!("{label} was replaced while locked")));
         }
         Ok(())
@@ -766,9 +789,17 @@ impl Drop for ExistingFileLock {
 
 fn gate_managed_home(home: &Path, require_auth: bool) -> Result<()> {
     validate_directory(home, "managed Grok home")?;
+    #[cfg(not(windows))]
     let home_before = fs::symlink_metadata(home).map_err(|error| {
         config_write(format!(
             "managed Grok home cannot be inspected ({})",
+            error.kind()
+        ))
+    })?;
+    #[cfg(windows)]
+    let home_before = same_file::Handle::from_path(home).map_err(|error| {
+        config_write(format!(
+            "managed Grok home identity cannot be inspected ({})",
             error.kind()
         ))
     })?;
@@ -795,13 +826,26 @@ fn gate_managed_home(home: &Path, require_auth: bool) -> Result<()> {
         ensure_lock_still_absent(&home.join("auth.json.lock"), "Grok auth lock")?;
     }
     validate_directory(home, "managed Grok home")?;
+    #[cfg(not(windows))]
     let home_after = fs::symlink_metadata(home).map_err(|error| {
         config_write(format!(
             "managed Grok home cannot be rechecked ({})",
             error.kind()
         ))
     })?;
-    if !metadata_identity_matches(&home_before, &home_after, "managed Grok home")? {
+    #[cfg(windows)]
+    let home_after = same_file::Handle::from_path(home).map_err(|error| {
+        config_write(format!(
+            "managed Grok home identity cannot be rechecked ({})",
+            error.kind()
+        ))
+    })?;
+    #[cfg(not(windows))]
+    let identity_matches =
+        metadata_identity_matches(&home_before, &home_after, "managed Grok home")?;
+    #[cfg(windows)]
+    let identity_matches = home_before == home_after;
+    if !identity_matches {
         return Err(config_write(
             "managed Grok home was replaced during validation",
         ));
