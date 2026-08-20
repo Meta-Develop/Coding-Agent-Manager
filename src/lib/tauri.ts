@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  LaunchedProcess,
   ProviderAccountList,
   ProviderDescriptor,
   QuotaSnapshot,
@@ -44,6 +45,15 @@ export function deleteAccount(
   accountId: string,
 ): Promise<void> {
   return invoke<void>('delete_account', { providerId, accountId })
+}
+
+/**
+ * Launches only the account already selected in Rust-owned metadata. Account
+ * ids, programs, arguments, environment names, paths, and secret values are
+ * deliberately absent from this IPC boundary.
+ */
+export function launchProvider(providerId: string): Promise<LaunchedProcess> {
+  return invoke<LaunchedProcess>('launch_provider', { providerId })
 }
 
 export function listQuota(): Promise<QuotaSnapshot[]> {
