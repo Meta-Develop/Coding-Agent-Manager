@@ -11,28 +11,35 @@ const confirmClass = `whitespace-nowrap rounded-md border border-accent bg-accen
 export type PendingKind = 'switch' | 'delete'
 
 /**
- * Per-row switch and delete, gated by the adapter's capabilities and
- * whether this application holds a stored copy of the row. Incomplete
- * rows can be deleted but never switched. Confirm and Cancel sit in a
- * following table row rather than in a dialog so they stay in the tab
- * order without a focus trap (`NFR-6`).
+ * Per-row selection/switch, launch, and delete, gated by the adapter's
+ * capabilities and whether this application holds a usable stored row.
+ * Confirm and Cancel sit in a following table row rather than in a dialog so
+ * they stay in the tab order without a focus trap (`NFR-6`).
  */
 export default function AccountActions({
   account,
   canSwitch,
+  canLaunch,
+  usesLaunchSelection,
   canDelete,
+  forgetsMetadataOnly,
   disabled,
   onRequest,
+  onLaunch,
 }: {
   account: Account
   canSwitch: boolean
+  canLaunch: boolean
+  usesLaunchSelection: boolean
   canDelete: boolean
+  forgetsMetadataOnly: boolean
   disabled: boolean
   onRequest: (kind: PendingKind) => void
+  onLaunch: () => void
 }) {
   const name = accountDisplayName(account)
 
-  if (!canSwitch && !canDelete) {
+  if (!canSwitch && !canLaunch && !canDelete) {
     return null
   }
 
@@ -45,7 +52,19 @@ export default function AccountActions({
           className={buttonClass}
           onClick={() => onRequest('switch')}
         >
-          Switch to {name}
+          {usesLaunchSelection
+            ? `Select ${name} for app launch`
+            : `Switch to ${name}`}
+        </button>
+      )}
+      {canLaunch && (
+        <button
+          type="button"
+          disabled={disabled}
+          className={buttonClass}
+          onClick={onLaunch}
+        >
+          Launch {name}
         </button>
       )}
       {canDelete && (
@@ -55,7 +74,7 @@ export default function AccountActions({
           className={buttonClass}
           onClick={() => onRequest('delete')}
         >
-          Delete {name}
+          {forgetsMetadataOnly ? `Forget ${name}` : `Delete ${name}`}
         </button>
       )}
     </div>

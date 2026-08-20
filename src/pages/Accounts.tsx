@@ -28,10 +28,10 @@ import type {
 /**
  * Lists accounts from every adapter, grouped by provider. Empty, unfinished,
  * failed, listed-with-error, and API-key-only listings are distinct (`NFR-8`).
- * Add appears when the adapter advertises it. Switch appears only when the
- * adapter advertises it, the row is a stored copy, and that copy is
- * complete. Delete appears when the adapter advertises it and the row is
- * stored, including incomplete slots (`FR-1`, `NFR-8`).
+ * Add appears when the adapter advertises it. Activation is presented either
+ * as a legacy tool-wide switch or as selection for an app-owned launch. Delete
+ * appears when the adapter advertises it and the row is stored, including
+ * incomplete slots (`FR-1`, `NFR-8`).
  */
 export default function Accounts() {
   const [providers, setProviders] = useState<ProviderDescriptor[]>([])
@@ -45,6 +45,7 @@ export default function Accounts() {
     requestPending,
     cancelPending,
     runMutation,
+    runLaunch,
   } = useAccountMutation()
 
   useEffect(() => {
@@ -74,8 +75,10 @@ export default function Accounts() {
     }
   }, [listingEpoch])
 
-  const cannotSwitch = providers.filter(
-    (provider) => !hasCapability(provider, 'switch-account'),
+  const cannotSelectOrSwitch = providers.filter(
+    (provider) =>
+      !hasCapability(provider, 'switch-account') &&
+      !hasCapability(provider, 'launch-tool'),
   )
 
   function handleConfirmPending() {
@@ -98,7 +101,7 @@ export default function Accounts() {
     <>
       <PageHeader
         title="Accounts"
-        description="Every account this application can see, grouped by provider. Add, switch, and delete appear only where an adapter implements them."
+        description="Every account this application can see, grouped by provider. Some adapters switch the tool itself; launch-selected adapters change only which account this application uses for a child process it launches."
       />
       {loading && (
         <p className="text-sm text-ink-muted" role="status">
@@ -131,6 +134,9 @@ export default function Accounts() {
               onAdd={(accountId) =>
                 runMutation('add', provider, accountId, accountId)
               }
+              onLaunch={(account) => {
+                void runLaunch(provider, accountDisplayName(account))
+              }}
               onRequest={(accountId, kind) =>
                 requestPending({
                   providerId: provider.id,
@@ -142,11 +148,13 @@ export default function Accounts() {
               onConfirmPending={handleConfirmPending}
             />
           ))}
-          {cannotSwitch.length > 0 && (
+          {cannotSelectOrSwitch.length > 0 && (
             <NotImplemented requirement="FR-1">
-              {cannotSwitch.map((provider) => provider.displayName).join(', ')}{' '}
-              cannot switch accounts yet. This page lists what those adapters
-              can see; it does not change which account those tools will use.
+              {cannotSelectOrSwitch
+                .map((provider) => provider.displayName)
+                .join(', ')}{' '}
+              cannot switch accounts or select an account for app launch yet.
+              This page only lists what those adapters can see.
             </NotImplemented>
           )}
         </div>
@@ -161,6 +169,7 @@ function ProviderAccounts({
   busy,
   pending,
   onAdd,
+  onLaunch,
   onRequest,
   onCancelPending,
   onConfirmPending,
@@ -170,6 +179,7 @@ function ProviderAccounts({
   busy: boolean
   pending: PendingConfirmation | null
   onAdd: (accountId: string) => Promise<boolean>
+  onLaunch: (account: Account) => void
   onRequest: (accountId: string, kind: PendingKind) => void
   onCancelPending: () => void
   onConfirmPending: () => void
@@ -177,6 +187,7 @@ function ProviderAccounts({
   const headingId = `accounts-heading-${provider.id}`
   const canAdd = hasCapability(provider, 'add-account')
   const canSwitch = hasCapability(provider, 'switch-account')
+  const canLaunch = hasCapability(provider, 'launch-tool')
   const canDelete = hasCapability(provider, 'delete-account')
 
   return (
@@ -194,15 +205,18 @@ function ProviderAccounts({
         busy,
         pending,
         canSwitch,
+        canLaunch,
         canDelete,
         onRequest,
+        onLaunch,
         onCancelPending,
         onConfirmPending,
       })}
       {canAdd && listingHasUnstored(listing) && (
         <p className="mt-3 text-sm text-ink-muted">
-          The tool&apos;s current identity is not stored here, so this
-          application cannot switch back to it.
+          {canLaunch
+            ? "The tool's current identity is not stored here, so this application cannot select it for an app-owned launch."
+            : "The tool's current identity is not stored here, so this application cannot switch back to it."}
         </p>
       )}
       {canAdd && (
@@ -219,8 +233,10 @@ function listingBody({
   busy,
   pending,
   canSwitch,
+  canLaunch,
   canDelete,
   onRequest,
+  onLaunch,
   onCancelPending,
   onConfirmPending,
 }: {
@@ -230,8 +246,10 @@ function listingBody({
   busy: boolean
   pending: PendingConfirmation | null
   canSwitch: boolean
+  canLaunch: boolean
   canDelete: boolean
   onRequest: (accountId: string, kind: PendingKind) => void
+  onLaunch: (account: Account) => void
   onCancelPending: () => void
   onConfirmPending: () => void
 }): ReactElement {
@@ -251,8 +269,10 @@ function listingBody({
       busy={busy}
       pending={pending}
       canSwitch={canSwitch}
+      canLaunch={canLaunch}
       canDelete={canDelete}
       onRequest={onRequest}
+      onLaunch={onLaunch}
       onCancelPending={onCancelPending}
       onConfirmPending={onConfirmPending}
     />
@@ -272,8 +292,8 @@ function listingBody({
       if (listing.accounts.length === 0) {
         return (
           <LimitationNote>
-            No GEMINI_API_KEY is set. This adapter cannot see Google OAuth
-            accounts.
+            No stored Gemini API-key account is available. This adapter does not
+            support Google OAuth accounts.
           </LimitationNote>
         )
       }
@@ -281,8 +301,8 @@ function listingBody({
         <>
           {table(listing.accounts)}
           <LimitationNote>
-            This adapter only sees GEMINI_API_KEY. It cannot see Google OAuth
-            accounts.
+            This adapter lists API-key accounts only. Google OAuth accounts are
+            not supported.
           </LimitationNote>
         </>
       )
@@ -362,8 +382,10 @@ function AccountTable({
   busy,
   pending,
   canSwitch,
+  canLaunch,
   canDelete,
   onRequest,
+  onLaunch,
   onCancelPending,
   onConfirmPending,
 }: {
@@ -373,8 +395,10 @@ function AccountTable({
   busy: boolean
   pending: PendingConfirmation | null
   canSwitch: boolean
+  canLaunch: boolean
   canDelete: boolean
   onRequest: (accountId: string, kind: PendingKind) => void
+  onLaunch: (account: Account) => void
   onCancelPending: () => void
   onConfirmPending: () => void
 }) {
@@ -384,6 +408,10 @@ function AccountTable({
   const showActions = accounts.some(
     (account) =>
       (canSwitch && account.isStored && !account.isIncomplete) ||
+      (canLaunch &&
+        account.isStored &&
+        !account.isIncomplete &&
+        account.isSelectedForLaunch) ||
       (canDelete && account.isStored),
   )
   const columnCount = 4 + (showExpires ? 1 : 0) + (showActions ? 1 : 0)
@@ -505,11 +533,21 @@ function AccountTable({
                             canSwitch={
                               canSwitch &&
                               account.isStored &&
-                              !account.isIncomplete
+                              !account.isIncomplete &&
+                              (!canLaunch || !account.isSelectedForLaunch)
                             }
+                            canLaunch={
+                              canLaunch &&
+                              account.isStored &&
+                              !account.isIncomplete &&
+                              account.isSelectedForLaunch
+                            }
+                            usesLaunchSelection={canLaunch}
                             canDelete={canDelete && account.isStored}
+                            forgetsMetadataOnly={provider.id === 'grok-cli'}
                             disabled={busy}
                             onRequest={(kind) => onRequest(account.id, kind)}
+                            onLaunch={() => onLaunch(account)}
                           />
                         )}
                       </td>
@@ -529,38 +567,56 @@ function AccountTable({
                           id={confirmId}
                           label={
                             pendingKind === 'switch'
-                              ? `Confirm switch to ${accountDisplayName(account)}`
-                              : `Confirm deletion of ${accountDisplayName(account)}`
+                              ? canLaunch
+                                ? `Confirm selection of ${accountDisplayName(account)} for app launch`
+                                : `Confirm switch to ${accountDisplayName(account)}`
+                              : provider.id === 'grok-cli'
+                                ? `Confirm forgetting ${accountDisplayName(account)}`
+                                : `Confirm deletion of ${accountDisplayName(account)}`
                           }
                           confirmLabel={
                             pendingKind === 'switch'
-                              ? `Confirm switch to ${accountDisplayName(account)}`
-                              : `Confirm deletion of ${accountDisplayName(account)}`
+                              ? canLaunch
+                                ? `Confirm selection of ${accountDisplayName(account)} for app launch`
+                                : `Confirm switch to ${accountDisplayName(account)}`
+                              : provider.id === 'grok-cli'
+                                ? `Confirm forgetting ${accountDisplayName(account)}`
+                                : `Confirm deletion of ${accountDisplayName(account)}`
                           }
                           cancelLabel={
                             pendingKind === 'switch'
-                              ? 'Cancel switch'
-                              : 'Cancel deletion'
+                              ? canLaunch
+                                ? 'Cancel launch selection'
+                                : 'Cancel switch'
+                              : provider.id === 'grok-cli'
+                                ? 'Cancel forgetting'
+                                : 'Cancel deletion'
                           }
                           disabled={busy}
                           onCancel={onCancelPending}
                           onConfirm={onConfirmPending}
                         >
                           {pendingKind === 'switch' ? (
-                            <>
-                              Switch {provider.displayName} to{' '}
-                              {accountDisplayName(account)}? This replaces the
-                              credential file in the tool&apos;s own home,
-                              behind a restorable backup. {provider.displayName}{' '}
-                              must not be running.
-                            </>
+                            canLaunch ? (
+                              <>
+                                Select {accountDisplayName(account)} for{' '}
+                                {provider.displayName} app launches? This
+                                changes manager metadata only, affects only a
+                                process launched by this application, and does
+                                not rewrite the tool&apos;s configuration or
+                                change already-running sessions.
+                              </>
+                            ) : (
+                              <>
+                                Switch {provider.displayName} to{' '}
+                                {accountDisplayName(account)}? This replaces the
+                                credential file in the tool&apos;s own home,
+                                behind a restorable backup.{' '}
+                                {provider.displayName} must not be running.
+                              </>
+                            )
                           ) : (
-                            <>
-                              Forget this application&apos;s stored copy of{' '}
-                              {accountDisplayName(account)}?{' '}
-                              {provider.displayName} is not signed out, and its
-                              own files are left untouched.
-                            </>
+                            deleteConfirmation(provider, account)
                           )}
                         </Confirmation>
                       </td>
@@ -659,17 +715,55 @@ function statusCell(account: Account, activeKnown: boolean): ReactNode {
       </span>
     )
   }
-  if (!activeKnown) {
-    return <span className="text-ink-muted">Not known</span>
-  }
-  if (account.isActive) {
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      {account.isSelectedForLaunch && (
+        <span className="inline-flex rounded-full border border-border-subtle bg-surface px-2 py-0.5 text-xs font-semibold text-ink">
+          Selected for app launch
+        </span>
+      )}
+      {!activeKnown ? (
+        <span className="text-ink-muted">Not known</span>
+      ) : account.isActive ? (
+        <span className="inline-flex rounded-full border border-border-subtle bg-surface px-2 py-0.5 text-xs font-semibold text-ink">
+          Active
+        </span>
+      ) : (
+        <span className="text-ink-muted">—</span>
+      )}
+    </span>
+  )
+}
+
+function deleteConfirmation(
+  provider: ProviderDescriptor,
+  account: Account,
+): ReactNode {
+  const name = accountDisplayName(account)
+  if (provider.id === 'grok-cli') {
     return (
-      <span className="inline-flex rounded-full border border-border-subtle bg-surface px-2 py-0.5 text-xs font-semibold text-ink">
-        Active
-      </span>
+      <>
+        Forget {name} from this application&apos;s metadata? The vendor-written
+        isolated home and credential deliberately remain on disk. This does not
+        sign out Grok CLI or destroy its credential.
+      </>
     )
   }
-  return <span className="text-ink-muted">—</span>
+  if (provider.id === 'gemini-cli') {
+    return (
+      <>
+        Delete {name} from CredentialStore and forget its manager metadata?
+        Already-running {provider.displayName} processes are unaffected.
+      </>
+    )
+  }
+  return (
+    <>
+      Forget this application&apos;s stored copy of {name}?{' '}
+      {provider.displayName} is not signed out, and its own files are left
+      untouched.
+    </>
+  )
 }
 
 /** Embed a filesystem path as a path, not as wrapping prose. */
