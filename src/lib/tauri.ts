@@ -3,7 +3,7 @@ import type {
   LaunchedProcess,
   ProviderAccountList,
   ProviderDescriptor,
-  QuotaSnapshot,
+  ProviderQuotaList,
   RelayStatus,
 } from '@/types'
 
@@ -56,8 +56,8 @@ export function launchProvider(providerId: string): Promise<LaunchedProcess> {
   return invoke<LaunchedProcess>('launch_provider', { providerId })
 }
 
-export function listQuota(): Promise<QuotaSnapshot[]> {
-  return invoke<QuotaSnapshot[]>('list_quota')
+export function listQuota(): Promise<ProviderQuotaList[]> {
+  return invoke<ProviderQuotaList[]>('list_quota')
 }
 
 export function relayStatus(): Promise<RelayStatus> {
