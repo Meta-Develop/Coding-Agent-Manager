@@ -4,16 +4,23 @@
 //! they translate IPC arguments into core calls and translate errors back. No
 //! business logic lives here.
 
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 use crate::model::{
     Account, AccountListError, AccountListErrorKind, AccountListOutcome, LaunchedProcess,
     ProviderAccountList, ProviderDescriptor, ProviderQuotaList, QuotaListError, QuotaListErrorKind,
-    QuotaListOutcome, QuotaSnapshot, RelayStatus,
+    QuotaListOutcome, QuotaSnapshot, RelayStatus, RouteRule,
 };
 use crate::providers;
 use crate::providers::codex_cli::CodexCliAdapter;
 use crate::providers::{ActivationMechanism, ProviderAdapter, StoredAccountRegistry};
 use crate::relay;
+use crate::router::{self, RouteError, RouteRuleField};
 use crate::storage;
 
 /// Providers whose `list_accounts` inspects only an API key, not OAuth.
@@ -23,6 +30,22 @@ use crate::storage;
 /// Drop `gemini-cli` when that adapter starts reading the OAuth credential
 /// file (`docs/research/gemini-cli.md` §2–§3).
 const API_KEY_ONLY_LISTING: &[&str] = &["gemini-cli"];
+
+const ROUTE_RULES_SCHEMA_VERSION: u32 = 1;
+const ROUTE_RULES_FILE: &str = "route-rules.json";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RouteRulesDocument {
+    schema_version: u32,
+    rules: Vec<RouteRule>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RouteRulesValidationError {
+    position: usize,
+    category: &'static str,
+}
 
 /// Every adapter compiled into this build, with live detection state.
 #[tauri::command]
@@ -358,6 +381,122 @@ fn quota_list_error(error: &Error) -> QuotaListError {
     }
 }
 
+/// Return the complete ordered routing-rule document.
+///
+/// A missing document is the valid empty rule list. Malformed, unsupported,
+/// or invalid existing state fails closed instead of being silently reset.
+#[tauri::command]
+pub fn list_route_rules() -> Result<Vec<RouteRule>> {
+    load_route_rules(&route_rules_path()?)
+}
+
+/// Atomically replace the complete ordered routing-rule document.
+///
+/// The webview supplies only non-secret rule metadata. Validation is repeated
+/// here at the native trust boundary, and an unreadable or unsupported current
+/// document prevents replacement so a newer build's state is never downgraded.
+#[tauri::command]
+pub fn replace_route_rules(rules: Vec<RouteRule>) -> Result<()> {
+    replace_route_rules_at(&route_rules_path()?, rules)
+}
+
+fn route_rules_path() -> Result<PathBuf> {
+    crate::paths::project_dirs()
+        .map(|dirs| dirs.data_dir().join(ROUTE_RULES_FILE))
+        .ok_or_else(|| Error::ConfigRead {
+            provider: "router".to_owned(),
+            reason: "the application data directory could not be resolved".to_owned(),
+        })
+}
+
+fn load_route_rules(path: &Path) -> Result<Vec<RouteRule>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(crate::fsx::io_at(path, error)),
+    };
+    let document: RouteRulesDocument =
+        serde_json::from_slice(&bytes).map_err(|_| route_rules_read_error(path, None))?;
+    if document.schema_version != ROUTE_RULES_SCHEMA_VERSION {
+        return Err(route_rules_read_error(path, None));
+    }
+    validate_route_rules(&document.rules)
+        .map_err(|issue| route_rules_read_error(path, Some(issue)))?;
+    Ok(document.rules)
+}
+
+fn replace_route_rules_at(path: &Path, rules: Vec<RouteRule>) -> Result<()> {
+    // Validate the old document first. A malformed or newer file is not an
+    // invitation to overwrite data this build cannot safely interpret.
+    let _existing = load_route_rules(path)?;
+    validate_route_rules(&rules).map_err(route_rules_write_error)?;
+
+    let document = RouteRulesDocument {
+        schema_version: ROUTE_RULES_SCHEMA_VERSION,
+        rules,
+    };
+    let mut bytes = serde_json::to_vec_pretty(&document)?;
+    bytes.push(b'\n');
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        crate::fsx::create_dir_all_private(parent)?;
+    }
+    crate::fsx::write_atomic(path, &bytes)
+}
+
+fn validate_route_rules(rules: &[RouteRule]) -> std::result::Result<(), RouteRulesValidationError> {
+    if let Err(error) = router::validate_rules(rules) {
+        let RouteError::InvalidRule { rule_index, field } = error else {
+            return Err(RouteRulesValidationError {
+                position: 1,
+                category: "invalid rule",
+            });
+        };
+        return Err(RouteRulesValidationError {
+            position: rule_index + 1,
+            category: route_rule_field_category(field),
+        });
+    }
+    for (index, rule) in rules.iter().enumerate() {
+        if providers::find(&rule.provider_id).is_none() {
+            return Err(RouteRulesValidationError {
+                position: index + 1,
+                category: "unregistered provider id",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn route_rule_field_category(field: RouteRuleField) -> &'static str {
+    match field {
+        RouteRuleField::MatchModel => "invalid model pattern",
+        RouteRuleField::ProviderId => "invalid provider id",
+        RouteRuleField::TargetModel => "invalid target model",
+        RouteRuleField::MaxUtilization => "invalid quota ceiling",
+    }
+}
+
+fn route_rules_read_error(path: &Path, issue: Option<RouteRulesValidationError>) -> Error {
+    let category = issue.map_or_else(
+        || "invalid or unsupported document".to_owned(),
+        |issue| format!("rule {}: {}", issue.position, issue.category),
+    );
+    Error::ConfigRead {
+        provider: "router".to_owned(),
+        reason: format!("{}: {category}", path.display()),
+    }
+}
+
+fn route_rules_write_error(issue: RouteRulesValidationError) -> Error {
+    Error::ConfigWrite {
+        provider: "router".to_owned(),
+        reason: format!("rule {}: {}", issue.position, issue.category),
+    }
+}
+
 /// Start the relay with its safe default loopback configuration.
 ///
 /// No listener configuration or authentication token crosses the IPC boundary.
@@ -391,6 +530,8 @@ pub fn run() {
             delete_account,
             launch_provider,
             list_quota,
+            list_route_rules,
+            replace_route_rules,
             start_relay,
             stop_relay,
             relay_status,
@@ -428,6 +569,15 @@ mod tests {
             resets_at: None,
             captured_at: "2030-01-01T00:00:00Z".to_string(),
             source: QuotaSource::LocalFile,
+        }
+    }
+
+    fn sample_route_rule(pattern: &str, provider_id: &str, target_model: &str) -> RouteRule {
+        RouteRule {
+            match_model: pattern.to_owned(),
+            provider_id: provider_id.to_owned(),
+            target_model: target_model.to_owned(),
+            max_utilization: None,
         }
     }
 
@@ -693,6 +843,133 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn missing_route_rule_document_is_an_empty_list() {
+        let temp = tempfile::tempdir().expect("route rules TempDir");
+        let path = temp.path().join("missing/route-rules.json");
+
+        assert_eq!(load_route_rules(&path).expect("missing document"), vec![]);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn route_rules_roundtrip_in_order_with_versioned_schema() {
+        let temp = tempfile::tempdir().expect("route rules TempDir");
+        let path = temp.path().join("private/nested/route-rules.json");
+        let rules = vec![
+            sample_route_rule("model-*", "codex-cli", "upstream-first"),
+            RouteRule {
+                max_utilization: Some(0.5),
+                ..sample_route_rule("model-exact", "claude-code", "upstream-second")
+            },
+        ];
+
+        replace_route_rules_at(&path, rules.clone()).expect("write rules");
+        assert_eq!(load_route_rules(&path).expect("read rules"), rules);
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("route document bytes"))
+                .expect("route document JSON");
+        assert_eq!(document["schemaVersion"], ROUTE_RULES_SCHEMA_VERSION);
+        assert_eq!(document["rules"][0]["targetModel"], "upstream-first");
+        assert_eq!(document["rules"][1]["targetModel"], "upstream-second");
+
+        replace_route_rules_at(&path, Vec::new()).expect("empty list is valid");
+        assert!(load_route_rules(&path).expect("read empty list").is_empty());
+    }
+
+    #[test]
+    fn malformed_unknown_or_newer_document_refuses_overwrite_byte_for_byte() {
+        let replacement = vec![sample_route_rule(
+            "model",
+            "codex-cli",
+            "replacement-upstream",
+        )];
+        for (name, original) in [
+            ("malformed", br#"{"marker":"FAKE-file-content""#.as_slice()),
+            (
+                "unknown-field",
+                br#"{"schemaVersion":1,"rules":[],"futureField":true}"#.as_slice(),
+            ),
+            ("newer", br#"{"schemaVersion":2,"rules":[]}"#.as_slice()),
+        ] {
+            let temp = tempfile::tempdir().expect("route rules TempDir");
+            let path = temp.path().join(format!("{name}.json"));
+            fs::write(&path, original).expect("stage existing document");
+
+            let error = replace_route_rules_at(&path, replacement.clone())
+                .expect_err("unsupported existing document must refuse overwrite");
+            assert!(matches!(&error, Error::ConfigRead { .. }));
+            assert!(!error.to_string().contains("FAKE-file-content"));
+            assert_eq!(fs::read(&path).expect("preserved bytes"), original);
+        }
+    }
+
+    #[test]
+    fn invalid_new_rule_refuses_the_entire_replacement() {
+        let temp = tempfile::tempdir().expect("route rules TempDir");
+        let path = temp.path().join("route-rules.json");
+        replace_route_rules_at(
+            &path,
+            vec![sample_route_rule("model", "codex-cli", "old-upstream")],
+        )
+        .expect("stage valid document");
+        let before = fs::read(&path).expect("old document bytes");
+        let submitted = "FAKE-secret-shaped*invalid-pattern";
+        let invalid = vec![
+            sample_route_rule("valid", "codex-cli", "valid-upstream"),
+            sample_route_rule(submitted, "claude-code", "new-upstream"),
+        ];
+
+        let error = replace_route_rules_at(&path, invalid)
+            .expect_err("invalid replacement must be rejected atomically");
+        assert!(matches!(&error, Error::ConfigWrite { provider, reason }
+            if provider == "router" && reason == "rule 2: invalid model pattern"));
+        assert!(!error.to_string().contains(submitted));
+        assert_eq!(fs::read(&path).expect("preserved old bytes"), before);
+    }
+
+    #[test]
+    fn unregistered_provider_is_rejected_without_echoing_its_value() {
+        let temp = tempfile::tempdir().expect("route rules TempDir");
+        let path = temp.path().join("route-rules.json");
+        let submitted = "FAKE-provider-not-registered";
+        let rules = vec![sample_route_rule("model", submitted, "upstream")];
+
+        let error = replace_route_rules_at(&path, rules)
+            .expect_err("unregistered provider must be rejected");
+        assert!(matches!(&error, Error::ConfigWrite { provider, reason }
+            if provider == "router" && reason == "rule 1: unregistered provider id"));
+        assert!(!error.to_string().contains(submitted));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn invalid_existing_rules_refuse_replacement() {
+        let temp = tempfile::tempdir().expect("route rules TempDir");
+        let path = temp.path().join("route-rules.json");
+        let original = br#"{
+  "schemaVersion": 1,
+  "rules": [{
+    "matchModel": "model",
+    "providerId": "FAKE-future-provider",
+    "targetModel": "upstream",
+    "maxUtilization": null
+  }]
+}
+"#;
+        fs::write(&path, original).expect("stage future-provider document");
+
+        let error = replace_route_rules_at(
+            &path,
+            vec![sample_route_rule("model", "codex-cli", "replacement")],
+        )
+        .expect_err("invalid existing rules must refuse replacement");
+        assert!(matches!(&error, Error::ConfigRead { provider, reason }
+            if provider == "router" && reason.contains("rule 1: unregistered provider id")));
+        assert!(!error.to_string().contains("FAKE-future-provider"));
+        assert_eq!(fs::read(&path).expect("preserved existing bytes"), original);
     }
 
     #[test]
