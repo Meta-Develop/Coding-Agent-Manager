@@ -1,284 +1,336 @@
-//! Model mapping and tiered routing.
+//! Ordered, account-aware request routing (FR-7).
 //!
-//! Given an inbound model name and the current quota picture, decide which
-//! provider and which upstream model should serve the request. [`select`] is a
-//! pure function: no I/O, no network, no filesystem. Failover on a rate-limit
-//! response (`FR-7`) needs a live relay and is not here.
+//! This module performs no I/O. The relay supplies configured account targets,
+//! M4 quota results, the current time, and any observed rate-limit deadline.
+//! A request can be served only from the [`RouteSelection`] returned here.
 
 use std::collections::HashMap;
-use std::io;
+use std::error::Error as StdError;
+use std::fmt;
 
-use crate::error::{Error, Result};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
-/// One routing rule, evaluated in order.
-#[derive(Debug, Clone)]
-pub struct RouteRule {
-    /// Inbound model name or glob, e.g. `gpt-4o*`.
-    ///
-    /// Syntax is documented on [`select`]: an exact name, or a single trailing
-    /// `*`. Matching is case-sensitive.
-    pub match_model: String,
-    /// Provider to serve it from.
+use crate::model::{ProviderQuotaList, QuotaListOutcome, QuotaSnapshot, RouteRule};
+
+/// Non-secret account identity attached to a relay target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteAccount {
     pub provider_id: String,
-    /// Upstream model name to substitute.
+    pub account_id: String,
+}
+
+/// The only router output from which the relay may choose an upstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteSelection {
+    pub rule_index: usize,
+    pub provider_id: String,
+    pub account_id: String,
     pub target_model: String,
-    /// Skip this rule when the account is above this utilisation, 0.0..=1.0.
-    pub max_utilization: Option<f32>,
+    /// Latest applicable provider-published reset strictly after selection.
+    /// The relay may use it when an observed rate-limit response has no usable
+    /// `Retry-After` value.
+    pub quota_resets_at: Option<OffsetDateTime>,
 }
 
-/// Pick the first rule whose model pattern matches `inbound_model` and whose
-/// `max_utilization` gate is satisfied.
-///
-/// Rules are evaluated in slice order. The first eligible rule wins; there is
-/// no "best" or "most specific" match. If no rule is eligible the request
-/// fails — there is no default rule and no implicit fallback
-/// (`docs/ARCHITECTURE.md` §6). Silently spending the wrong account's quota is
-/// worse than an error.
-///
-/// # Model pattern syntax
-///
-/// `RouteRule.match_model` is either an exact inbound model name or a prefix
-/// glob. This is the whole language; the UI should describe it as such.
-///
-/// - `gpt-4o` matches only `gpt-4o`.
-/// - `gpt-4o*` matches `gpt-4o` and any name that starts with `gpt-4o`
-///   (`gpt-4o-mini`, `gpt-4o-2024-05-13`, …). This is the documented example.
-/// - `*` matches every inbound name.
-///
-/// Matching is **case-sensitive**: `GPT-4o` does not match `gpt-4o`. A `*`
-/// that is not the final character is taken literally, not as a wildcard.
-/// There is no `?`, no character class (`[abc]`), and no escape sequence.
-///
-/// # Utilisation gate
-///
-/// `utilization` is the current window-consumed fraction (`0.0..=1.0`) of the
-/// account each provider would spend, keyed by [`RouteRule::provider_id`]. A
-/// missing key means utilisation is **unknown**, not zero.
-///
-/// The picture is keyed by provider, not by rule, because a `RouteRule` names
-/// a provider and an upstream model, not an account. The caller collapses the
-/// quota snapshot of the account that provider would spend into this map; two
-/// rules targeting the same provider share one number.
-///
-/// The three cases are kept distinct:
-///
-/// - No ceiling: the gate does not apply.
-/// - Ceiling set and utilisation known: skip the rule when utilisation is
-///   strictly above the ceiling. Equal to the ceiling still matches.
-/// - Ceiling set and utilisation unknown: the gate is satisfied. Unknown is
-///   not a number, so it is not compared. Treating a missing signal as
-///   "already too high" would fabricate a utilisation (`NFR-8`) and would
-///   make every ceilinged rule dead for providers that publish no quota
-///   signal — the normal case until quota collection exists, and a permanent
-///   case for several adapters. §6 refuses an *unmatched* request falling
-///   through to an arbitrary account; it does not refuse a user-authored rule
-///   because telemetry is missing. Spending the account the user ordered
-///   when the optional gate cannot be evaluated is following the list, not
-///   inventing a fallback.
-pub fn select(
-    rules: &[RouteRule],
-    inbound_model: &str,
-    utilization: &HashMap<&str, f32>,
-) -> Result<RouteRule> {
-    rules
-        .iter()
-        .find(|rule| {
-            model_matches(&rule.match_model, inbound_model) && within_ceiling(rule, utilization)
-        })
-        .cloned()
-        .ok_or_else(|| no_matching_rule(inbound_model))
+/// Public rule field names for secret-free validation errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteRuleField {
+    MatchModel,
+    ProviderId,
+    TargetModel,
+    MaxUtilization,
 }
 
-fn model_matches(pattern: &str, inbound: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) if !prefix.contains('*') => inbound.starts_with(prefix),
-        _ => pattern == inbound,
+/// Routing failures contain positions and categories, never submitted values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteError {
+    InvalidRule {
+        rule_index: usize,
+        field: RouteRuleField,
+    },
+    MissingRouteAccount {
+        rule_index: usize,
+    },
+    DuplicateRouteAccounts {
+        rule_index: usize,
+    },
+    InvalidRouteAccount {
+        rule_index: usize,
+    },
+    UnmatchedModel,
+    NoEligibleRoute,
+}
+
+impl fmt::Display for RouteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRule { rule_index, field } => write!(
+                formatter,
+                "routing rule {rule_index} has an invalid {}",
+                field.as_str()
+            ),
+            Self::MissingRouteAccount { rule_index } => {
+                write!(
+                    formatter,
+                    "routing rule {rule_index} has no configured account"
+                )
+            }
+            Self::DuplicateRouteAccounts { rule_index } => write!(
+                formatter,
+                "routing rule {rule_index} resolves to more than one account"
+            ),
+            Self::InvalidRouteAccount { rule_index } => write!(
+                formatter,
+                "routing rule {rule_index} resolves to an invalid account"
+            ),
+            Self::UnmatchedModel => formatter.write_str("no routing rule matches the model"),
+            Self::NoEligibleRoute => {
+                formatter.write_str("matching routing rules have no eligible account")
+            }
+        }
     }
 }
 
-fn within_ceiling(rule: &RouteRule, utilization: &HashMap<&str, f32>) -> bool {
-    let Some(max) = rule.max_utilization else {
-        return true;
-    };
-    match utilization.get(rule.provider_id.as_str()) {
-        Some(&current) => current <= max,
-        None => true,
+impl StdError for RouteError {}
+
+impl RouteRuleField {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MatchModel => "model pattern",
+            Self::ProviderId => "provider id",
+            Self::TargetModel => "target model",
+            Self::MaxUtilization => "quota ceiling",
+        }
     }
 }
 
-/// No rule was eligible. Names the inbound model and nothing else: no account
-/// id, no credential, no provider list (`NFR-1`).
-///
-/// `Error` has no routing variant; `Io`/`NotFound` is the closest existing
-/// bucket that can carry the inbound model. A dedicated `NoMatchingRoute`
-/// variant would be the right taxonomy.
-fn no_matching_rule(inbound_model: &str) -> Error {
-    Error::Io(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("no routing rule matches inbound model `{inbound_model}`"),
-    ))
+/// In-memory account throttle state. It is deliberately not serializable.
+#[derive(Debug, Default)]
+pub struct RouterState {
+    throttled_until: HashMap<(String, String), OffsetDateTime>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl RouterState {
+    /// Select the first eligible matching rule at or after `start_index`.
+    ///
+    /// Rules are always validated as a complete document before evaluation.
+    /// A matching rule must resolve to exactly one configured account; an
+    /// absent or ambiguous account is a configuration error and cannot cause
+    /// fallback. Quota and an observed account throttle are the only
+    /// pre-request conditions that skip an otherwise matching valid rule.
+    pub fn select_next(
+        &mut self,
+        rules: &[RouteRule],
+        accounts: &[RouteAccount],
+        quotas: &[ProviderQuotaList],
+        inbound_model: &str,
+        start_index: usize,
+        now: OffsetDateTime,
+    ) -> Result<RouteSelection, RouteError> {
+        validate_rules(rules)?;
+        self.throttled_until.retain(|_, until| *until > now);
 
-    fn rule(match_model: &str, provider_id: &str) -> RouteRule {
-        RouteRule {
-            match_model: match_model.to_owned(),
-            provider_id: provider_id.to_owned(),
-            target_model: format!("{provider_id}-upstream"),
-            max_utilization: None,
+        let any_pattern_matches = rules
+            .iter()
+            .any(|rule| model_matches(&rule.match_model, inbound_model));
+
+        for (rule_index, rule) in rules.iter().enumerate().skip(start_index) {
+            if !model_matches(&rule.match_model, inbound_model) {
+                continue;
+            }
+
+            let account = resolve_account(rule_index, &rule.provider_id, accounts)?;
+            if self.is_throttled(account, now) {
+                continue;
+            }
+
+            let quota = applicable_quota(
+                quotas,
+                &rule.provider_id,
+                &account.account_id,
+                &rule.target_model,
+                now,
+            );
+            if rule
+                .max_utilization
+                .is_some_and(|ceiling| quota.is_none_or(|quota| quota.utilization > ceiling))
+            {
+                continue;
+            }
+
+            return Ok(RouteSelection {
+                rule_index,
+                provider_id: rule.provider_id.clone(),
+                account_id: account.account_id.clone(),
+                target_model: rule.target_model.clone(),
+                quota_resets_at: quota.and_then(|quota| quota.resets_at),
+            });
+        }
+
+        if any_pattern_matches {
+            Err(RouteError::NoEligibleRoute)
+        } else {
+            Err(RouteError::UnmatchedModel)
         }
     }
 
-    fn assert_no_match(result: Result<RouteRule>, inbound: &str) {
-        let err = result.expect_err("must not pick a rule");
-        let text = err.to_string();
-        assert!(
-            text.contains(inbound),
-            "error must name the inbound model, got: {text}"
-        );
+    /// Record only an observed rate-limit deadline for the selected account.
+    /// A repeated observation may extend, but never shorten, the throttle.
+    pub fn record_rate_limit(&mut self, selection: &RouteSelection, until: OffsetDateTime) {
+        let key = (selection.provider_id.clone(), selection.account_id.clone());
+        self.throttled_until
+            .entry(key)
+            .and_modify(|current| *current = (*current).max(until))
+            .or_insert(until);
     }
 
-    #[test]
-    fn exact_name_matches_only_that_name() {
-        // An un-globbed pattern is a precise binding: `gpt-4o` must not
-        // quietly absorb `gpt-4o-mini` and spend a different account's quota.
-        let rules = [rule("gpt-4o", "openai")];
-        let none = HashMap::new();
-
-        let got = select(&rules, "gpt-4o", &none).expect("exact match");
-        assert_eq!(got.provider_id, "openai");
-        assert_eq!(got.target_model, "openai-upstream");
-
-        assert_no_match(select(&rules, "gpt-4o-mini", &none), "gpt-4o-mini");
+    /// Return the recorded deadline for an account, including an expired one
+    /// that has not yet been pruned by a selection call.
+    pub fn throttle_until(&self, provider_id: &str, account_id: &str) -> Option<OffsetDateTime> {
+        self.throttled_until
+            .get(&(provider_id.to_owned(), account_id.to_owned()))
+            .copied()
     }
 
-    #[test]
-    fn documented_prefix_glob_matches_the_family() {
-        // `gpt-4o*` is the example in the `RouteRule` field docs and the
-        // syntax the UI will describe. The prefix itself and any longer name
-        // must match; a different family must not.
-        let rules = [rule("gpt-4o*", "openai")];
-        let none = HashMap::new();
+    fn is_throttled(&self, account: &RouteAccount, now: OffsetDateTime) -> bool {
+        self.throttled_until
+            .get(&(account.provider_id.clone(), account.account_id.clone()))
+            .is_some_and(|until| *until > now)
+    }
+}
 
-        assert_eq!(
-            select(&rules, "gpt-4o", &none)
-                .expect("prefix itself")
-                .provider_id,
-            "openai"
-        );
-        assert_eq!(
-            select(&rules, "gpt-4o-mini", &none)
-                .expect("longer name")
-                .provider_id,
-            "openai"
-        );
-        assert_no_match(select(&rules, "gpt-5", &none), "gpt-5");
+/// Validate the whole ordered rule document before it can spend any quota.
+pub fn validate_rules(rules: &[RouteRule]) -> Result<(), RouteError> {
+    for (rule_index, rule) in rules.iter().enumerate() {
+        if rule.match_model.trim().is_empty() || !valid_pattern(&rule.match_model) {
+            return Err(RouteError::InvalidRule {
+                rule_index,
+                field: RouteRuleField::MatchModel,
+            });
+        }
+        if rule.provider_id.trim().is_empty() {
+            return Err(RouteError::InvalidRule {
+                rule_index,
+                field: RouteRuleField::ProviderId,
+            });
+        }
+        if rule.target_model.trim().is_empty() {
+            return Err(RouteError::InvalidRule {
+                rule_index,
+                field: RouteRuleField::TargetModel,
+            });
+        }
+        if rule
+            .max_utilization
+            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            return Err(RouteError::InvalidRule {
+                rule_index,
+                field: RouteRuleField::MaxUtilization,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn valid_pattern(pattern: &str) -> bool {
+    let stars = pattern.bytes().filter(|byte| *byte == b'*').count();
+    stars == 0 || (stars == 1 && pattern.ends_with('*'))
+}
+
+fn model_matches(pattern: &str, inbound_model: &str) -> bool {
+    pattern.strip_suffix('*').map_or_else(
+        || pattern == inbound_model,
+        |prefix| inbound_model.starts_with(prefix),
+    )
+}
+
+fn resolve_account<'a>(
+    rule_index: usize,
+    provider_id: &str,
+    accounts: &'a [RouteAccount],
+) -> Result<&'a RouteAccount, RouteError> {
+    let mut matches = accounts
+        .iter()
+        .filter(|account| account.provider_id == provider_id);
+    let account = matches
+        .next()
+        .ok_or(RouteError::MissingRouteAccount { rule_index })?;
+    if matches.next().is_some() {
+        return Err(RouteError::DuplicateRouteAccounts { rule_index });
+    }
+    if account.account_id.trim().is_empty() {
+        return Err(RouteError::InvalidRouteAccount { rule_index });
+    }
+    Ok(account)
+}
+
+#[derive(Clone, Copy)]
+struct ApplicableQuota {
+    utilization: f32,
+    resets_at: Option<OffsetDateTime>,
+}
+
+fn applicable_quota(
+    quotas: &[ProviderQuotaList],
+    provider_id: &str,
+    account_id: &str,
+    target_model: &str,
+    now: OffsetDateTime,
+) -> Option<ApplicableQuota> {
+    let mut providers = quotas
+        .iter()
+        .filter(|quota| quota.provider_id == provider_id);
+    let provider = providers.next()?;
+    if providers.next().is_some() || !matches!(provider.outcome, QuotaListOutcome::Available) {
+        return None;
+    }
+    if provider
+        .snapshots
+        .iter()
+        .any(|snapshot| !valid_snapshot(snapshot))
+    {
+        return None;
     }
 
-    #[test]
-    fn first_matching_rule_wins_even_when_a_later_rule_is_more_specific() {
-        // Evaluation is ordered, not scored. A later exact rule must not
-        // steal a request the earlier glob already claimed, or the list the
-        // user authored is not the list that runs.
-        let rules = [rule("gpt-4o*", "openai"), rule("gpt-4o", "anthropic")];
-
-        let got = select(&rules, "gpt-4o", &HashMap::new()).expect("first match");
-        assert_eq!(got.provider_id, "openai");
+    let applicable: Vec<_> = provider
+        .snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot.account_id == account_id
+                && snapshot
+                    .model
+                    .as_deref()
+                    .is_none_or(|model| model == target_model)
+        })
+        .collect();
+    if applicable.is_empty() {
+        return None;
     }
 
-    #[test]
-    fn a_rule_over_its_ceiling_falls_through_to_the_next_match() {
-        // The gate is a skip, not a failure: an exhausted preferred account
-        // must yield to the next rule that still matches, not abort the
-        // request.
-        let mut preferred = rule("gpt-4o", "openai");
-        preferred.max_utilization = Some(0.5);
-        let rules = [preferred, rule("gpt-4o", "anthropic")];
-        let utilization = HashMap::from([("openai", 0.8)]);
+    let utilization = applicable
+        .iter()
+        .map(|snapshot| snapshot.utilization)
+        .fold(0.0_f32, f32::max);
+    let resets_at = applicable
+        .iter()
+        .filter_map(|snapshot| snapshot.resets_at.as_deref())
+        .filter_map(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+        .filter(|reset| *reset > now)
+        .max();
+    Some(ApplicableQuota {
+        utilization,
+        resets_at,
+    })
+}
 
-        let got = select(&rules, "gpt-4o", &utilization).expect("fallthrough");
-        assert_eq!(got.provider_id, "anthropic");
-    }
-
-    #[test]
-    fn unknown_utilization_does_not_skip_a_ceilinged_rule() {
-        // Unknown is not a number (`NFR-8`). Fabricating "too high" would
-        // make every ceilinged rule dead for providers that publish no
-        // signal, which is the normal case until quota collection exists.
-        let mut gated = rule("gpt-4o", "openai");
-        gated.max_utilization = Some(0.5);
-        let fallback = rule("gpt-4o", "anthropic");
-        let rules = [gated, fallback];
-
-        let got = select(&rules, "gpt-4o", &HashMap::new()).expect("unknown satisfies");
-        assert_eq!(got.provider_id, "openai");
-    }
-
-    #[test]
-    fn no_matching_rule_is_an_error_not_an_arbitrary_account() {
-        // §6: silently spending the wrong account's quota is worse than an
-        // error. A later, unrelated rule must not be promoted into a default.
-        let rules = [rule("claude-*", "anthropic"), rule("gemini-*", "google")];
-
-        assert_no_match(select(&rules, "gpt-4o", &HashMap::new()), "gpt-4o");
-    }
-
-    #[test]
-    fn an_empty_rule_list_is_the_same_error_not_a_panic() {
-        // An empty list is "nothing matched", not a programming error. The
-        // relay will start with no rules configured; that must be a clean
-        // failure naming the inbound model.
-        assert_no_match(select(&[], "gpt-4o", &HashMap::new()), "gpt-4o");
-    }
-
-    #[test]
-    fn matching_is_case_sensitive() {
-        // Vendor model ids are case-sensitive strings. Folding case would
-        // make `GPT-4o` spend the `gpt-4o` rule, which is a different name.
-        let rules = [rule("gpt-4o", "openai")];
-        assert_no_match(select(&rules, "GPT-4o", &HashMap::new()), "GPT-4o");
-    }
-
-    #[test]
-    fn a_rule_with_no_ceiling_ignores_known_utilization() {
-        // The gate is optional (`FR-7`). A missing ceiling must not be read
-        // as zero, or every rule would be skipped the moment any utilisation
-        // is known.
-        let rules = [rule("gpt-4o", "openai")];
-        let utilization = HashMap::from([("openai", 0.99)]);
-
-        let got = select(&rules, "gpt-4o", &utilization).expect("no ceiling");
-        assert_eq!(got.provider_id, "openai");
-    }
-
-    #[test]
-    fn a_rule_at_its_ceiling_still_matches() {
-        // "Above" is strict: equal to the ceiling is still within it. A
-        // ceiling of 1.0 would otherwise refuse a fully consumed window.
-        let mut gated = rule("gpt-4o", "openai");
-        gated.max_utilization = Some(0.8);
-        let utilization = HashMap::from([("openai", 0.8)]);
-
-        let got = select(&[gated], "gpt-4o", &utilization).expect("at ceiling");
-        assert_eq!(got.provider_id, "openai");
-    }
-
-    #[test]
-    fn a_star_that_is_not_final_is_literal() {
-        // The UI can describe the syntax without lying: there is no hidden
-        // mid-string wildcard.
-        let rules = [rule("gpt-*-mini", "openai")];
-        let none = HashMap::new();
-
-        assert_no_match(select(&rules, "gpt-4o-mini", &none), "gpt-4o-mini");
-        assert_eq!(
-            select(&rules, "gpt-*-mini", &none)
-                .expect("literal star")
-                .provider_id,
-            "openai"
-        );
-    }
+fn valid_snapshot(snapshot: &QuotaSnapshot) -> bool {
+    snapshot.utilization.is_finite()
+        && (0.0..=1.0).contains(&snapshot.utilization)
+        && OffsetDateTime::parse(&snapshot.captured_at, &Rfc3339).is_ok()
+        && snapshot
+            .resets_at
+            .as_deref()
+            .is_none_or(|value| OffsetDateTime::parse(value, &Rfc3339).is_ok())
 }
