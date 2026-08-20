@@ -36,6 +36,9 @@ pub fn run() {
             commands::activate_account,
             commands::delete_account,
             commands::list_quota,
+            commands::start_relay,
+            commands::stop_relay,
+            commands::relay_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Coding Agent Manager");
