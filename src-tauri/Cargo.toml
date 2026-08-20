@@ -63,6 +63,10 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "s
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 # Adapts Reqwest response chunks into Axum bodies without buffering a stream.
 futures-util = { version = "0.3", default-features = false, features = ["async-await", "std"] }
+# Grok's vendor lock contract is a real non-blocking advisory file lock. Rust
+# 1.88 does not yet provide the stable std file-lock API, so use the same small
+# cross-platform primitive as the pinned vendor source.
+fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
