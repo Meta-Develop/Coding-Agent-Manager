@@ -8,7 +8,12 @@ import {
   type ReactNode,
 } from 'react'
 import type { PendingKind } from '@/components/AccountActions'
-import { activateAccount, addAccount, deleteAccount } from '@/lib/tauri'
+import {
+  activateAccount,
+  addAccount,
+  deleteAccount,
+  launchProvider,
+} from '@/lib/tauri'
 import type { ProviderDescriptor } from '@/types'
 
 export interface PendingConfirmation {
@@ -34,6 +39,10 @@ interface AccountMutationValue {
     kind: PendingKind | 'add',
     provider: ProviderDescriptor,
     accountId: string,
+    accountName: string,
+  ) => Promise<boolean>
+  runLaunch: (
+    provider: ProviderDescriptor,
     accountName: string,
   ) => Promise<boolean>
 }
@@ -112,6 +121,44 @@ export function AccountMutationProvider({ children }: { children: ReactNode }) {
     [],
   )
 
+  const runLaunch = useCallback(
+    async (
+      provider: ProviderDescriptor,
+      accountName: string,
+    ): Promise<boolean> => {
+      if (busyRef.current) {
+        return false
+      }
+      busyRef.current = true
+      setPending(null)
+      setBusy(true)
+      setNotice({
+        tone: 'progress',
+        message: `Launching ${provider.displayName} with ${accountName}, using the account selected for this app-owned process…`,
+      })
+      try {
+        try {
+          const process = await launchProvider(provider.id)
+          setNotice({
+            tone: 'success',
+            message: `Launched an app-owned ${provider.displayName} child for ${process.accountId} (PID ${process.processId}). External launches and already-running sessions are unchanged.`,
+          })
+        } catch (cause: unknown) {
+          setNotice({
+            tone: 'failure',
+            message: `Could not launch ${provider.displayName} for ${accountName}: ${commandErrorMessage(cause)}`,
+          })
+          return false
+        }
+        return true
+      } finally {
+        busyRef.current = false
+        setBusy(false)
+      }
+    },
+    [],
+  )
+
   const value = useMemo<AccountMutationValue>(
     () => ({
       busy,
@@ -121,6 +168,7 @@ export function AccountMutationProvider({ children }: { children: ReactNode }) {
       requestPending,
       cancelPending,
       runMutation,
+      runLaunch,
     }),
     [
       busy,
@@ -130,6 +178,7 @@ export function AccountMutationProvider({ children }: { children: ReactNode }) {
       requestPending,
       cancelPending,
       runMutation,
+      runLaunch,
     ],
   )
 
@@ -184,10 +233,25 @@ function progressMessage(
   accountName: string,
 ): string {
   if (kind === 'add') {
+    if (provider.id === 'gemini-cli') {
+      return `Importing ${accountId} for ${provider.displayName} from the native parent process into CredentialStore…`
+    }
+    if (provider.id === 'grok-cli') {
+      return `Adding ${accountId} to ${provider.displayName}. Vendor sign-in is waiting in the launching terminal and will write a retained isolated home; leaving this page does not cancel it.`
+    }
     return `Adding ${accountId} to ${provider.displayName}. Sign-in is waiting in the terminal that launched this application; this window will update when it finishes. Closing this window does not cancel that sign-in, and this application cannot cancel it either.`
   }
   if (kind === 'switch') {
+    if (provider.capabilities.includes('launch-tool')) {
+      return `Selecting ${accountName} for ${provider.displayName} app launches…`
+    }
     return `Switching ${provider.displayName} to ${accountName}…`
+  }
+  if (provider.id === 'grok-cli') {
+    return `Forgetting ${accountName} from this application's metadata. The vendor-written home and credential will remain on disk.`
+  }
+  if (provider.id === 'gemini-cli') {
+    return `Deleting ${accountName} from CredentialStore. Already-running ${provider.displayName} processes are unaffected.`
   }
   return `Deleting this application's stored copy of ${accountName}…`
 }
@@ -202,7 +266,16 @@ function successMessage(
     return `Added ${accountId} to ${provider.displayName}.`
   }
   if (kind === 'switch') {
+    if (provider.capabilities.includes('launch-tool')) {
+      return `Selected ${accountName} for ${provider.displayName} app launches.`
+    }
     return `Switched ${provider.displayName} to ${accountName}.`
+  }
+  if (provider.id === 'grok-cli') {
+    return `Forgot ${accountName} from this application's metadata. Its vendor-written home and credential remain on disk.`
+  }
+  if (provider.id === 'gemini-cli') {
+    return `Deleted ${accountName} from CredentialStore. Already-running ${provider.displayName} processes were not changed.`
   }
   return `Deleted this application's stored copy of ${accountName}.`
 }
@@ -217,7 +290,16 @@ function failureLead(
     return `Could not add ${accountId} to ${provider.displayName}:`
   }
   if (kind === 'switch') {
+    if (provider.capabilities.includes('launch-tool')) {
+      return `Could not select ${accountName} for ${provider.displayName} app launches:`
+    }
     return `Could not switch ${provider.displayName} to ${accountName}:`
+  }
+  if (provider.id === 'grok-cli') {
+    return `Could not forget ${accountName} from this application's metadata:`
+  }
+  if (provider.id === 'gemini-cli') {
+    return `Could not delete ${accountName} from CredentialStore:`
   }
   return `Could not delete ${accountName}:`
 }

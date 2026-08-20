@@ -9,11 +9,9 @@ const controlFocus =
 
 /**
  * Adds a stored account for one adapter. The name is the account id, so the
- * allowed characters are on screen before submit. Sign-in is not hosted in
- * this window: the command blocks on the vendor CLI in the launching
- * terminal, and that has to be visible before anyone clicks Add. Closing
- * this window does not cancel that login, and this application cannot
- * cancel it either — say so here, not only after the command has started.
+ * allowed characters are on screen before submit. Provider-specific copy
+ * describes the native credential ingress without ever accepting a secret
+ * in this webview.
  */
 export default function AddAccountForm({
   provider,
@@ -102,12 +100,7 @@ export default function AddAccountForm({
         characters.
       </p>
       <p id={explanationId} className="mt-2 text-sm text-ink-muted">
-        Sign-in runs in {provider.displayName} itself, in the terminal that
-        launched this application. This window does not host the prompt. Adding
-        an account does not return until that sign-in finishes or fails. Closing
-        this window or leaving this page does not cancel that sign-in, and this
-        application cannot cancel it either. A window-hosted sign-in is not
-        built yet.
+        {addExplanation(provider)}
       </p>
       {validation !== null && (
         <p id={errorId} className="mt-2 text-sm" role="alert">
@@ -115,6 +108,41 @@ export default function AddAccountForm({
         </p>
       )}
     </form>
+  )
+}
+
+function addExplanation(provider: ProviderDescriptor) {
+  if (provider.id === 'gemini-cli') {
+    return (
+      <>
+        This imports <code className="font-mono">GEMINI_API_KEY</code> from this
+        application&apos;s native parent process into CredentialStore. The key
+        is never typed into or returned to this webview. Start or restart this
+        application with the variable set; restart it again with a different
+        source key before adding another account. Only Gemini API-key accounts
+        are supported here, not Google OAuth accounts.
+      </>
+    )
+  }
+  if (provider.id === 'grok-cli') {
+    return (
+      <>
+        Sign-in runs in {provider.displayName} itself, in the terminal that
+        launched this application. The vendor writes the credential into a
+        retained, isolated home for this account. This window does not host or
+        cancel that prompt, and leaving this page does not cancel it.
+      </>
+    )
+  }
+  return (
+    <>
+      Sign-in runs in {provider.displayName} itself, in the terminal that
+      launched this application. This window does not host the prompt. Adding an
+      account does not return until that sign-in finishes or fails. Closing this
+      window or leaving this page does not cancel that sign-in, and this
+      application cannot cancel it either. A window-hosted sign-in is not built
+      yet.
+    </>
   )
 }
 

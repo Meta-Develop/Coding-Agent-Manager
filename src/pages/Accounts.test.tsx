@@ -10,7 +10,12 @@ import Providers from '@/pages/Providers'
 import Relay from '@/pages/Relay'
 import RouterRules from '@/pages/RouterRules'
 import Settings from '@/pages/Settings'
-import type { Account, ProviderAccountList, ProviderDescriptor } from '@/types'
+import type {
+  Account,
+  LaunchedProcess,
+  ProviderAccountList,
+  ProviderDescriptor,
+} from '@/types'
 
 describe('Accounts page', () => {
   it('shows no Add, Switch, or Delete when the provider advertises nothing', async () => {
@@ -457,6 +462,281 @@ describe('Accounts page', () => {
     expect(add).not.toHaveBeenCalled()
     expect(callsOf('add_account')).toHaveLength(0)
   })
+
+  it('renders launch selection independently from the active tool identity', async () => {
+    stubInvoke({
+      providers: [
+        provider({
+          id: 'gemini-cli',
+          displayName: 'Gemini CLI',
+          vendor: 'Google',
+          capabilities: [
+            'add-account',
+            'switch-account',
+            'delete-account',
+            'launch-tool',
+          ],
+        }),
+      ],
+      listings: [
+        listing('gemini-cli', {
+          outcome: { kind: 'listed-api-key-only' },
+          accounts: [
+            account({
+              id: 'selected',
+              providerId: 'gemini-cli',
+              label: 'Selected',
+              authKind: 'api-key',
+              isSelectedForLaunch: true,
+            }),
+            account({
+              id: 'active',
+              providerId: 'gemini-cli',
+              label: 'Active elsewhere',
+              authKind: 'api-key',
+              isActive: true,
+            }),
+            account({
+              id: 'unfinished',
+              providerId: 'gemini-cli',
+              label: 'Unfinished',
+              authKind: 'api-key',
+              isSelectedForLaunch: true,
+              isIncomplete: true,
+            }),
+          ],
+        }),
+      ],
+    })
+    renderApp()
+
+    const selectedRow = await screen.findByRole('row', { name: /Selected/ })
+    const activeRow = screen.getByRole('row', { name: /Active elsewhere/ })
+    expect(
+      within(selectedRow).getByText('Selected for app launch'),
+    ).toBeInTheDocument()
+    expect(within(selectedRow).queryByText(/^Active$/)).not.toBeInTheDocument()
+    expect(within(activeRow).getByText(/^Active$/)).toBeInTheDocument()
+    expect(
+      within(activeRow).queryByText('Selected for app launch'),
+    ).not.toBeInTheDocument()
+    expect(
+      within(selectedRow).getByRole('button', { name: 'Launch Selected' }),
+    ).toBeInTheDocument()
+    expect(
+      within(selectedRow).queryByRole('button', {
+        name: /Select Selected for app launch/,
+      }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(activeRow).getByRole('button', {
+        name: 'Select Active elsewhere for app launch',
+      }),
+    ).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('row', { name: /Unfinished/ })).queryByRole(
+        'button',
+        { name: /Launch Unfinished/ },
+      ),
+    ).not.toBeInTheDocument()
+  })
+
+  it('confirms launch selection as metadata-only and invokes activation with public ids', async () => {
+    const user = userEvent.setup()
+    const activate = vi.fn(async () => undefined)
+    stubInvoke({
+      providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
+      listings: [
+        listing('gemini-cli', {
+          outcome: { kind: 'listed-api-key-only' },
+          accounts: [
+            account({
+              id: 'work',
+              providerId: 'gemini-cli',
+              label: 'Work',
+              authKind: 'api-key',
+            }),
+          ],
+        }),
+      ],
+      activate,
+    })
+    renderApp()
+
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Select Work for app launch',
+      }),
+    )
+    expect(
+      screen.getByText(/changes manager metadata only/i),
+    ).toHaveTextContent(/affects only a process launched by this application/i)
+    expect(
+      screen.getByText(/changes manager metadata only/i),
+    ).toHaveTextContent(/does not rewrite the tool's configuration/i)
+    await user.click(
+      screen.getByRole('button', {
+        name: 'Confirm selection of Work for app launch',
+      }),
+    )
+
+    expect(activate).toHaveBeenCalledWith('gemini-cli', 'work')
+    expect(callsOf('activate_account').at(-1)?.[1]).toEqual({
+      providerId: 'gemini-cli',
+      accountId: 'work',
+    })
+    expect(
+      await screen.findByText(/Selected Work for Gemini CLI app launches/),
+    ).toBeInTheDocument()
+  })
+
+  it('launches only the selected complete account with provider-id-only IPC', async () => {
+    const user = userEvent.setup()
+    const launch = vi.fn(async (): Promise<LaunchedProcess> => ({
+      providerId: 'gemini-cli',
+      accountId: 'work',
+      processId: 4242,
+    }))
+    stubInvoke({
+      providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
+      listings: [
+        listing('gemini-cli', {
+          outcome: { kind: 'listed-api-key-only' },
+          accounts: [
+            account({
+              id: 'work',
+              providerId: 'gemini-cli',
+              label: 'Work',
+              authKind: 'api-key',
+              isSelectedForLaunch: true,
+            }),
+          ],
+        }),
+      ],
+      launch,
+    })
+    renderApp()
+
+    await user.click(await screen.findByRole('button', { name: 'Launch Work' }))
+
+    expect(launch).toHaveBeenCalledWith('gemini-cli')
+    expect(callsOf('launch_provider')).toHaveLength(1)
+    expect(callsOf('launch_provider')[0]?.[1]).toEqual({
+      providerId: 'gemini-cli',
+    })
+    expect(
+      await screen.findByText(
+        /Launched an app-owned Gemini CLI child for work \(PID 4242\)/,
+      ),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/app-owned Gemini CLI child/i)).toHaveTextContent(
+      /External launches and already-running sessions are unchanged/i,
+    )
+  })
+
+  it('reports launch refusal without claiming an external session changed', async () => {
+    const user = userEvent.setup()
+    stubInvoke({
+      providers: [launchProviderDescriptor('grok-cli', 'Grok CLI')],
+      listings: [
+        listing('grok-cli', {
+          accounts: [
+            account({
+              id: 'work',
+              providerId: 'grok-cli',
+              label: 'Work',
+              isSelectedForLaunch: true,
+            }),
+          ],
+        }),
+      ],
+      launch: async () => {
+        throw 'vendor lock is held'
+      },
+    })
+    renderApp()
+
+    await user.click(await screen.findByRole('button', { name: 'Launch Work' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'Could not launch Grok CLI for Work: vendor lock is held',
+    )
+    expect(alert).not.toHaveTextContent(/switched|active session changed/i)
+  })
+
+  it('explains native Gemini key import and sends no key through IPC', async () => {
+    const user = userEvent.setup()
+    const add = vi.fn(async () => undefined)
+    stubInvoke({
+      providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
+      listings: [
+        listing('gemini-cli', {
+          outcome: { kind: 'listed-api-key-only' },
+        }),
+      ],
+      add,
+    })
+    renderApp()
+
+    const explanation = await screen.findByText(
+      /native parent process into CredentialStore/i,
+    )
+    expect(explanation).toHaveTextContent(
+      /never typed into or returned to this webview/i,
+    )
+    expect(explanation).toHaveTextContent(
+      /restart it again with a different source key/i,
+    )
+    expect(explanation).toHaveTextContent(
+      /Only Gemini API-key accounts are supported here, not Google OAuth accounts/i,
+    )
+    await user.type(
+      screen.getByRole('textbox', { name: 'Account name' }),
+      'work',
+    )
+    await user.click(
+      screen.getByRole('button', { name: 'Add account to Gemini CLI' }),
+    )
+
+    expect(add).toHaveBeenCalledWith('gemini-cli', 'work')
+    expect(callsOf('add_account').at(-1)?.[1]).toEqual({
+      providerId: 'gemini-cli',
+      accountId: 'work',
+    })
+  })
+
+  it('warns that forgetting Grok metadata retains the vendor home and credential', async () => {
+    const user = userEvent.setup()
+    const remove = vi.fn(async () => undefined)
+    stubInvoke({
+      providers: [launchProviderDescriptor('grok-cli', 'Grok CLI')],
+      listings: [
+        listing('grok-cli', {
+          accounts: [
+            account({
+              id: 'work',
+              providerId: 'grok-cli',
+              label: 'Work',
+            }),
+          ],
+        }),
+      ],
+      remove,
+    })
+    renderApp()
+
+    await user.click(await screen.findByRole('button', { name: 'Forget Work' }))
+    expect(screen.getByText(/vendor-written isolated home/i)).toHaveTextContent(
+      /credential deliberately remain on disk/i,
+    )
+    expect(screen.getByText(/vendor-written isolated home/i)).toHaveTextContent(
+      /does not sign out Grok CLI or destroy its credential/i,
+    )
+    await user.click(
+      screen.getByRole('button', { name: 'Confirm forgetting Work' }),
+    )
+    expect(remove).toHaveBeenCalledWith('grok-cli', 'work')
+  })
 })
 
 function renderApp(path = '/accounts') {
@@ -486,6 +766,7 @@ function stubInvoke(options: {
   add?: (providerId: string, accountId: string) => Promise<void>
   activate?: (providerId: string, accountId: string) => Promise<void>
   remove?: (providerId: string, accountId: string) => Promise<void>
+  launch?: (providerId: string) => Promise<LaunchedProcess>
 }) {
   const providers = options.providers ?? [provider()]
   vi.mocked(invoke).mockImplementation(async (command, args) => {
@@ -521,9 +802,32 @@ function stubInvoke(options: {
           )
         }
         return undefined
+      case 'launch_provider':
+        if (options.launch) {
+          return options.launch(payload.providerId ?? '')
+        }
+        throw new Error('launch was not stubbed')
       default:
         throw new Error(`unexpected command: ${String(command)}`)
     }
+  })
+}
+
+function launchProviderDescriptor(
+  id: string,
+  displayName: string,
+): ProviderDescriptor {
+  return provider({
+    id,
+    displayName,
+    vendor:
+      id === 'gemini-cli' ? 'Google' : id === 'grok-cli' ? 'xAI' : 'Unknown',
+    capabilities: [
+      'add-account',
+      'switch-account',
+      'delete-account',
+      'launch-tool',
+    ],
   })
 }
 
