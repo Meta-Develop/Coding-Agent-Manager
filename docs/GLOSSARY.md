@@ -12,7 +12,7 @@
 | **Managed tool**              | An AI coding agent this application manages, e.g. Codex CLI.                                                                                                                       |
 | **Masked identity**           | A vendor identity reduced for display, e.g. `a***@example.com`. The only identity form that crosses to the webview.                                                                |
 | **Maturity**                  | How complete an adapter is: `planned`, `experimental`, or `supported`. Shown in the UI so it cannot overstate itself. Not the gate for add, switch, or delete buttons.             |
-| **Stored account**            | A per-account directory this application created, holding a vendor-written credential file. Distinct from the live tool home.                                                      |
+| **Stored account**            | An account backed by a vendor-written home (`VendorHome`) or a credential-store secret resolved only at child spawn (`CredentialStore`). No vendor file exists for the latter.     |
 | **Profile**                   | A named set of provider→account bindings, so several tools switch together.                                                                                                        |
 | **Provider**                  | A managed tool plus its vendor, e.g. Claude Code / Anthropic.                                                                                                                      |
 | **Quota snapshot**            | An observation of remaining quota at a point in time, with its source and age. Disposable cache.                                                                                   |
