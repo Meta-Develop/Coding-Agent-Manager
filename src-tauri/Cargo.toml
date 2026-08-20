@@ -68,6 +68,10 @@ futures-util = { version = "0.3", default-features = false, features = ["async-a
 # cross-platform primitive as the pinned vendor source.
 fs2 = "0.4"
 
+[target."cfg(windows)".dependencies]
+# Stable file-handle identity for replacement-race checks on Windows.
+same-file = "1.0.6"
+
 [dev-dependencies]
 tempfile = "3"
 

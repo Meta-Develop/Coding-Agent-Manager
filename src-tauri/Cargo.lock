@@ -692,6 +692,7 @@ dependencies = [
  "futures-util",
  "keyring",
  "reqwest",
+ "same-file",
  "serde",
  "serde_json",
  "subtle",
