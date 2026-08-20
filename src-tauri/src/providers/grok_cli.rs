@@ -271,6 +271,7 @@ fn account_from_entry(identity_key: &str, value: &Value) -> Result<Account> {
         // NFR-8 forbids marking an entry active. Not most-recently-created,
         // not file order, not "the only one".
         is_active: false,
+        is_selected_for_launch: false,
         // Entries live in the tool's own auth.json. This adapter stores
         // nothing, so mutating operations have nothing to act on.
         is_stored: false,

@@ -6,13 +6,14 @@
 
 use crate::error::{Error, Result};
 use crate::model::{
-    Account, AccountListError, AccountListErrorKind, AccountListOutcome, ProviderAccountList,
-    ProviderDescriptor, QuotaSnapshot, RelayStatus,
+    Account, AccountListError, AccountListErrorKind, AccountListOutcome, LaunchedProcess,
+    ProviderAccountList, ProviderDescriptor, QuotaSnapshot, RelayStatus,
 };
 use crate::providers;
 use crate::providers::codex_cli::CodexCliAdapter;
-use crate::providers::ProviderAdapter;
+use crate::providers::{ActivationMechanism, ProviderAdapter, StoredAccountRegistry};
 use crate::relay;
+use crate::storage;
 
 /// Providers whose `list_accounts` inspects only an API key, not OAuth.
 ///
@@ -151,15 +152,25 @@ fn adapter_for(provider_id: &str) -> Result<Box<dyn providers::ProviderAdapter>>
 
 /// Create a stored account on `provider_id` named `account_id`.
 ///
-/// This command is blocking and interactive. The Codex adapter (the only
-/// implementation today) spawns the vendor CLI's own `codex login` with
-/// inherited stdio, so it does not return until the user finishes signing
-/// in, and the CLI's prompts appear on the terminal that launched this
-/// application. The UI has to say so; hiding that would strand a user who
-/// never looks at that terminal.
+/// Legacy adapters own their transaction. Core-managed adapters persist
+/// pending/complete metadata around native provisioning and send any returned
+/// `Secret` directly to `CredentialStore`; no secret is an IPC argument.
 #[tauri::command]
 pub fn add_account(provider_id: String, account_id: String) -> Result<()> {
-    adapter_for(&provider_id)?.add_account(&account_id)
+    let adapter = adapter_for(&provider_id)?;
+    let Some(plan) = adapter.managed_account_plan() else {
+        return adapter.add_account(&account_id);
+    };
+    let store = (plan.material == crate::model::StoredAccountMaterial::CredentialStore)
+        .then(storage::default_store)
+        .transpose()?;
+    providers::add_managed_account(
+        &stored_account_registry()?,
+        adapter.as_ref(),
+        &account_id,
+        &account_id,
+        store.as_deref(),
+    )
 }
 
 /// Make `account_id` the account `provider_id`'s tool will use on its next start.
@@ -168,13 +179,77 @@ pub fn add_account(provider_id: String, account_id: String) -> Result<()> {
 /// every adapter for an id is both wasteful and ambiguous.
 #[tauri::command]
 pub fn activate_account(provider_id: String, account_id: String) -> Result<()> {
-    adapter_for(&provider_id)?.activate_account(&account_id)
+    let adapter = adapter_for(&provider_id)?;
+    match adapter.activation_mechanism() {
+        ActivationMechanism::ToolConfiguration => adapter.activate_account(&account_id),
+        ActivationMechanism::LaunchEnvironment => providers::select_launch_account(
+            &stored_account_registry()?,
+            adapter.as_ref(),
+            &account_id,
+        ),
+    }
 }
 
-/// Forget a stored account. Does not sign the user out of the live tool.
+/// Forget a stored account. Core-managed deletion clears selection first,
+/// deletes credential-store material when present, and retains vendor homes.
 #[tauri::command]
 pub fn delete_account(provider_id: String, account_id: String) -> Result<()> {
-    adapter_for(&provider_id)?.delete_account(&account_id)
+    let adapter = adapter_for(&provider_id)?;
+    let Some(plan) = adapter.managed_account_plan() else {
+        return adapter.delete_account(&account_id);
+    };
+    let store = (plan.material == crate::model::StoredAccountMaterial::CredentialStore)
+        .then(storage::default_store)
+        .transpose()?;
+    providers::delete_managed_account(
+        &stored_account_registry()?,
+        adapter.as_ref(),
+        &account_id,
+        store.as_deref(),
+    )
+}
+
+/// Start a provider tool with the environment of its selected stored account.
+///
+/// The webview supplies no environment or credential value. The adapter
+/// declares the command; core resolves any credential only at spawn time and
+/// returns non-secret process metadata.
+#[tauri::command]
+pub fn launch_provider(provider_id: String) -> Result<LaunchedProcess> {
+    let adapter = adapter_for(&provider_id)?;
+    if adapter.activation_mechanism() != ActivationMechanism::LaunchEnvironment {
+        return Err(Error::NotImplemented("launch_provider"));
+    }
+    let account = stored_account_registry()?
+        .selected(&provider_id)?
+        .ok_or_else(|| Error::UnknownAccount(provider_id.clone()))?;
+    let spec = providers::launch_spec_for(adapter.as_ref(), &account)?;
+    let store = spec
+        .requires_credential()
+        .then(storage::default_store)
+        .transpose()?;
+    let mut child = providers::spawn_launch(spec, &account, store.as_deref())?;
+    let process = LaunchedProcess {
+        provider_id,
+        account_id: account.id,
+        process_id: child.id(),
+    };
+    // Waiting outside the command keeps an exited CLI from becoming a zombie
+    // while allowing the IPC call to return as soon as the process starts.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(process)
+}
+
+fn stored_account_registry() -> Result<StoredAccountRegistry> {
+    let dirs = crate::paths::project_dirs().ok_or_else(|| Error::ConfigRead {
+        provider: "account-metadata".to_string(),
+        reason: "the application data directory could not be resolved".to_string(),
+    })?;
+    Ok(StoredAccountRegistry::new(
+        crate::paths::stored_accounts_path(dirs.data_dir()),
+    ))
 }
 
 /// Quota snapshots from every adapter that publishes one.
@@ -217,6 +292,27 @@ pub async fn relay_status() -> Result<RelayStatus> {
     relay::relay_status().await
 }
 
+/// Start the desktop application. Tauri remains confined to this IPC module.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![
+            list_providers,
+            list_accounts,
+            add_account,
+            activate_account,
+            delete_account,
+            launch_provider,
+            list_quota,
+            start_relay,
+            stop_relay,
+            relay_status,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Coding Agent Manager");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +326,7 @@ mod tests {
             masked_identity: Some("****0001".to_string()),
             auth_kind: AuthKind::ApiKey,
             is_active: true,
+            is_selected_for_launch: false,
             is_stored: false,
             is_incomplete: false,
             expires_at: None,

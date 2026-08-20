@@ -565,6 +565,7 @@ function account(partial: Partial<Account> & Pick<Account, 'id'>): Account {
     maskedIdentity: '****ab12',
     authKind: 'oauth',
     isActive: false,
+    isSelectedForLaunch: false,
     isStored: true,
     isIncomplete: false,
     expiresAt: null,

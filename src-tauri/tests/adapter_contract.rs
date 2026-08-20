@@ -20,13 +20,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use coding_agent_manager_lib::error::Error;
-use coding_agent_manager_lib::model::{Account, Maturity, ProviderCapability};
+use coding_agent_manager_lib::model::{
+    Account, AuthKind, Maturity, ProviderCapability, StoredAccountMaterial, StoredAccountMetadata,
+    StoredAccountState,
+};
 use coding_agent_manager_lib::providers::claude_code::ClaudeCodeAdapter;
 use coding_agent_manager_lib::providers::codex_cli::CodexCliAdapter;
 use coding_agent_manager_lib::providers::cursor::CursorAdapter;
 use coding_agent_manager_lib::providers::gemini_cli::GeminiCliAdapter;
 use coding_agent_manager_lib::providers::grok_cli::GrokCliAdapter;
-use coding_agent_manager_lib::providers::{self, ProviderAdapter};
+use coding_agent_manager_lib::providers::{self, ActivationMechanism, ProviderAdapter};
 use tempfile::TempDir;
 
 use crate::common::{assert_no_fake, copy_tree, tree_digest, FAKE_PREFIX};
@@ -264,7 +267,9 @@ fn activate_account_is_implemented_or_exactly_not_implemented() {
 /// `NFR-8`: advertised capabilities must match method implementation.
 ///
 /// An adapter that lists a capability must not return `NotImplemented`
-/// from the corresponding method, and one that omits it must. The probe
+/// from the corresponding contract path, and one that omits it must. A
+/// configuration switch uses `activate_account`; an environment switch uses
+/// `launch_spec` after core persists a complete selected record. The probe
 /// id is not a safe path component, so a real implementation refuses
 /// before creating a directory, writing the live home, or spawning the
 /// vendor CLI. The suite therefore never starts `codex`, never reaches
@@ -277,6 +282,7 @@ fn advertised_capabilities_match_method_implementation() {
         ProviderCapability::AddAccount,
         ProviderCapability::SwitchAccount,
         ProviderCapability::DeleteAccount,
+        ProviderCapability::LaunchTool,
     ];
 
     for id in registry_ids() {
@@ -287,9 +293,26 @@ fn advertised_capabilities_match_method_implementation() {
 
         for capability in expected {
             let result = match capability {
-                ProviderCapability::AddAccount => adapter.add_account(PROBE),
-                ProviderCapability::SwitchAccount => adapter.activate_account(PROBE),
-                ProviderCapability::DeleteAccount => adapter.delete_account(PROBE),
+                ProviderCapability::AddAccount => match adapter.managed_account_plan() {
+                    Some(plan) => adapter
+                        .provision_stored_account(&contract_probe_metadata(id, PROBE, plan))
+                        .map(|_| ()),
+                    None => adapter.add_account(PROBE),
+                },
+                ProviderCapability::SwitchAccount => match adapter.activation_mechanism() {
+                    ActivationMechanism::ToolConfiguration => adapter.activate_account(PROBE),
+                    ActivationMechanism::LaunchEnvironment => adapter
+                        .launch_spec(&contract_probe_metadata_for(adapter.as_ref(), PROBE))
+                        .map(|_| ()),
+                },
+                ProviderCapability::DeleteAccount => match adapter.managed_account_plan() {
+                    Some(plan) => adapter
+                        .validate_stored_account_delete(&contract_probe_metadata(id, PROBE, plan)),
+                    None => adapter.delete_account(PROBE),
+                },
+                ProviderCapability::LaunchTool => adapter
+                    .launch_spec(&contract_probe_metadata_for(adapter.as_ref(), PROBE))
+                    .map(|_| ()),
             };
             let after = tree_digest(home.path());
             assert_eq!(
@@ -315,6 +338,63 @@ fn advertised_capabilities_match_method_implementation() {
                 );
             }
         }
+    }
+}
+
+fn contract_probe_metadata_for(
+    adapter: &dyn ProviderAdapter,
+    account_id: &str,
+) -> StoredAccountMetadata {
+    match adapter.managed_account_plan() {
+        Some(plan) => contract_probe_metadata(adapter.id(), account_id, plan),
+        None => StoredAccountMetadata {
+            id: account_id.to_string(),
+            provider_id: adapter.id().to_string(),
+            label: "contract probe".to_string(),
+            auth_kind: AuthKind::Unknown,
+            state: StoredAccountState::Complete,
+            material: StoredAccountMaterial::VendorHome,
+            is_selected: true,
+        },
+    }
+}
+
+fn contract_probe_metadata(
+    provider_id: &str,
+    account_id: &str,
+    plan: coding_agent_manager_lib::providers::ManagedAccountPlan,
+) -> StoredAccountMetadata {
+    StoredAccountMetadata {
+        id: account_id.to_string(),
+        provider_id: provider_id.to_string(),
+        label: "contract probe".to_string(),
+        auth_kind: plan.auth_kind,
+        state: StoredAccountState::Complete,
+        material: plan.material,
+        is_selected: true,
+    }
+}
+
+/// Environment selection is useful only through the app-owned launcher, and
+/// launching must use an explicitly selected complete account. Advertising
+/// either half alone would expose a dead-end UI path (NFR-8).
+#[test]
+fn launch_environment_pairs_switch_and_launch_capabilities() {
+    for adapter in providers::registry() {
+        if adapter.activation_mechanism() != ActivationMechanism::LaunchEnvironment {
+            continue;
+        }
+        let capabilities = adapter.descriptor().capabilities;
+        assert!(
+            capabilities.contains(&ProviderCapability::SwitchAccount),
+            "`{}` uses launch-environment activation without switch-account",
+            adapter.id()
+        );
+        assert!(
+            capabilities.contains(&ProviderCapability::LaunchTool),
+            "`{}` uses launch-environment activation without launch-tool",
+            adapter.id()
+        );
     }
 }
 

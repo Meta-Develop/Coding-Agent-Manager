@@ -163,6 +163,7 @@ impl ProviderAdapter for GeminiCliAdapter {
             // see, and it is the value the CLI reads. `is_active` is
             // therefore `true`.
             is_active: true,
+            is_selected_for_launch: false,
             // GEMINI_API_KEY is the tool's environment, not a stored copy
             // this application created.
             is_stored: false,
