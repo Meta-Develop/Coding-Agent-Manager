@@ -103,8 +103,8 @@ export default function RouterRules() {
       await replaceRouteRules(checked)
       setSaveStatus(
         checked.length === 1
-          ? 'Saved 1 routing rule.'
-          : `Saved ${checked.length} routing rules.`,
+          ? 'Saved 1 routing rule. It will apply when the relay next starts.'
+          : `Saved ${checked.length} routing rules. They will apply when the relay next starts.`,
       )
     } catch (cause: unknown) {
       setSaveError(`Could not save routing rules: ${String(cause)}`)
@@ -123,7 +123,8 @@ export default function RouterRules() {
       <p className="mb-6 text-sm text-ink-muted">
         Rules are tried strictly from top to bottom. There is no default route;
         a request errors when every matching rule is ineligible or no rule
-        matches.
+        matches. Saved changes apply when the relay next starts. If it is
+        running, stop and start it to apply them.
       </p>
 
       {loading && (
