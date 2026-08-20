@@ -627,12 +627,15 @@ impl CodexCliAdapter {
                 self.config_write(format!("could not create {}: {error}", parent.display()))
             })?;
         }
-        let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
             builder.mode(0o700);
-        }
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = fs::DirBuilder::new();
         builder.create(dir).map_err(|error| {
             if error.kind() == ErrorKind::AlreadyExists {
                 self.config_write(format!(
