@@ -31,3 +31,4 @@ contributor could reverse in an afternoon.
 | [0006](0006-clean-room-independent-implementation.md)              | Clean-room independent implementation              | Accepted |
 | [0007](0007-reading-other-implementations.md)                      | Reading other implementations                      | Accepted |
 | [0008](0008-vendor-written-auth-json-for-stored-codex-accounts.md) | Vendor-written auth.json for stored Codex accounts | Proposed |
+| [0009](0009-launch-environment-account-selection.md)               | Launch-environment account selection               | Proposed |
