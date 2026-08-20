@@ -117,6 +117,18 @@ pub struct QuotaSnapshot {
     pub source: QuotaSource,
 }
 
+/// Secret-free relay state exposed to the webview.
+///
+/// Listener configuration that can contain credentials stays in the Rust core.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayStatus {
+    pub running: bool,
+    pub bind_address: String,
+    pub port: u16,
+    pub prefixes: Vec<String>,
+}
+
 /// Per-provider result of `list_accounts`.
 ///
 /// A flat `Vec<Account>` cannot tell "listed zero", "cannot list yet", and
@@ -365,6 +377,33 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&QuotaSource::Unknown).unwrap(),
             r#""unknown""#
+        );
+    }
+
+    #[test]
+    fn relay_status_wire_shape_contains_only_public_listener_state() {
+        let status = RelayStatus {
+            running: true,
+            bind_address: "127.0.0.1".to_string(),
+            port: 8787,
+            prefixes: vec![
+                "/v1/chat/completions".to_string(),
+                "/v1/messages".to_string(),
+                "/v1beta/models/*:generateContent".to_string(),
+            ],
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({
+                "running": true,
+                "bindAddress": "127.0.0.1",
+                "port": 8787,
+                "prefixes": [
+                    "/v1/chat/completions",
+                    "/v1/messages",
+                    "/v1beta/models/*:generateContent"
+                ]
+            })
         );
     }
 

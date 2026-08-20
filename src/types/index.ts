@@ -74,6 +74,15 @@ export interface QuotaSnapshot {
   source: 'local-file' | 'api' | 'header' | 'unknown'
 }
 
+/** Secret-free state for the local relay listener. */
+export interface RelayStatus {
+  running: boolean
+  bindAddress: string
+  port: number
+  /** Inbound dialect paths configured by the Rust relay core. */
+  prefixes: string[]
+}
+
 /** How `list_accounts` finished for one provider. */
 export type AccountListOutcome =
   | { kind: 'listed' }
