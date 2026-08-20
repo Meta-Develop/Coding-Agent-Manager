@@ -151,6 +151,24 @@ pub struct LaunchedProcess {
     pub process_id: u32,
 }
 
+/// One user-authored routing rule, evaluated in list order (FR-7).
+///
+/// A rule identifies a provider, not a credential. The native router resolves
+/// that provider to exactly one configured account before a request can be
+/// served, and secret material never crosses IPC.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RouteRule {
+    /// Exact inbound model name or one case-sensitive trailing-`*` prefix.
+    pub match_model: String,
+    /// Provider whose configured account may serve the request.
+    pub provider_id: String,
+    /// Upstream model substituted by the relay.
+    pub target_model: String,
+    /// Optional maximum consumed fraction, inclusive, in `0.0..=1.0`.
+    pub max_utilization: Option<f32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QuotaSource {

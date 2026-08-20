@@ -90,6 +90,18 @@ export interface LaunchedProcess {
   processId: number
 }
 
+/** One user-authored routing rule, evaluated in list order (FR-7). */
+export interface RouteRule {
+  /** Exact model name or one case-sensitive trailing-* prefix. */
+  matchModel: string
+  /** Provider whose configured account may serve the request. */
+  providerId: ProviderId
+  /** Model name sent to the selected upstream. */
+  targetModel: string
+  /** Optional inclusive maximum consumed fraction, in 0..1. */
+  maxUtilization: number | null
+}
+
 export interface QuotaSnapshot {
   accountId: string
   model: string | null
