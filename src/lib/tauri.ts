@@ -5,6 +5,7 @@ import type {
   ProviderDescriptor,
   ProviderQuotaList,
   RelayStatus,
+  RouteRule,
 } from '@/types'
 
 /**
@@ -58,6 +59,15 @@ export function launchProvider(providerId: string): Promise<LaunchedProcess> {
 
 export function listQuota(): Promise<ProviderQuotaList[]> {
   return invoke<ProviderQuotaList[]>('list_quota')
+}
+
+export function listRouteRules(): Promise<RouteRule[]> {
+  return invoke<RouteRule[]>('list_route_rules')
+}
+
+/** Atomically replaces the complete ordered routing-rule list. */
+export function replaceRouteRules(rules: RouteRule[]): Promise<void> {
+  return invoke<void>('replace_route_rules', { rules })
 }
 
 export function relayStatus(): Promise<RelayStatus> {
