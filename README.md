@@ -1,30 +1,31 @@
 # Coding Agent Manager
 
-Unified account, credential, and quota manager for AI coding agents.
+Account, credential, quota, relay, and routing manager for AI coding agents.
 
-Switching between accounts on a coding agent is a manual, error-prone ritual:
-log out, log in, hope the tool did not cache the old identity, repeat for every
-other tool you use. Coding Agent Manager keeps every account for every agent in
-one place and makes switching a single click, with no re-authentication.
+Coding Agent Manager is a pre-alpha desktop application with provider-specific
+account operations. It does not offer the same switch mechanism for every
+provider: Codex CLI uses a legacy configuration-file replacement, Gemini CLI
+and Grok CLI use account selection for app-owned launches, and Claude Code and
+Cursor are read-only.
 
-> **Status: pre-alpha.** The application skeleton, the adapter contract, and
-> the full specification are in place. Codex CLI can add a stored account,
-> switch the live `auth.json`, and delete a stored copy. That switch is a
-> local file replacement; it is not proven against the vendor. Claude Code,
-> Grok CLI, and Gemini CLI can list accounts; they cannot switch. See
+> **Status: pre-alpha.** All five adapters are experimental. Codex CLI can add,
+> switch, and delete stored copies, but its copied-credential switch is not
+> proven against the vendor. Gemini API-key and Grok accounts can be added,
+> selected, launched, and forgotten through app-owned launch paths. Claude Code
+> and Cursor do not implement account mutation. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md) for what lands when, and
 > [`docs/PROVIDER_MATRIX.md`](docs/PROVIDER_MATRIX.md) for what is known
 > about each tool today.
 
 ## Supported providers
 
-| Provider    | Vendor    | Auth           | Adapter status | Notes                                                                                                                                                                                                                          |
-| ----------- | --------- | -------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Claude Code | Anthropic | OAuth, API key | Experimental   | Lists the on-disk identity by reading `.credentials.json` and `~/.claude.json`; switching is not implemented                                                                                                                   |
-| Codex CLI   | OpenAI    | OAuth, API key | Experimental   | Adds a stored account via isolated `codex login`, lists the live identity plus stored copies, switches by replacing live `auth.json`, deletes a stored copy without signing out. The switch is not proven against the vendor.  |
-| Cursor      | Anysphere | Unknown        | Planned        | Credential location not yet established                                                                                                                                                                                        |
-| Grok CLI    | xAI       | OAuth, API key | Experimental   | Lists signed-in OIDC identities from `auth.json`, skips reserved scopes, honours `$GROK_HOME`. That file is not multi-account. Switching is not implemented.                                                                   |
-| Gemini CLI  | Google    | OAuth, API key | Experimental   | Lists an account when `GEMINI_API_KEY` is set; does not list OAuth accounts (reads only that variable, not the OAuth files vendor source now names); switching is not implemented, and an OAuth switch remains unimplementable |
+| Provider    | Vendor    | Auth             | Adapter status | Capabilities                                                     | Notes                                                                                                                                                                                                               |
+| ----------- | --------- | ---------------- | -------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code | Anthropic | OAuth, API key   | Experimental   | None                                                             | Lists the on-disk identity. The two identity fields are `[verified-local]`, but switching remains below its required safety bar.                                                                                    |
+| Codex CLI   | OpenAI    | OAuth, API key   | Experimental   | `add-account`, `switch-account`, `delete-account`                | Replaces live `auth.json` behind a restorable backup. Vendor acceptance of a copied credential remains untested.                                                                                                    |
+| Cursor      | Anysphere | Unknown, API key | Experimental   | None                                                             | Lists the Cursor CLI identity through `cursor-agent status`. Credential storage and switching remain unknown.                                                                                                       |
+| Grok CLI    | xAI       | OAuth, API key   | Experimental   | `add-account`, `switch-account`, `delete-account`, `launch-tool` | Selects a retained managed `GROK_HOME` for an app-owned child and removes inherited `GROK_AUTH_PATH`. Forgetting removes manager metadata but retains the vendor home. This does not affect Grok started elsewhere. |
+| Gemini CLI  | Google    | OAuth, API key   | Experimental   | `add-account`, `switch-account`, `delete-account`, `launch-tool` | Resolves a stored API key only when spawning an app-owned child. The tested flow does not change Gemini configuration files. OAuth account listing and switching remain unimplemented.                              |
 
 Antigravity, Windsurf, GitHub Copilot, OpenCode, Aider, and Cline are planned
 behind the same adapter interface. Adding one does not require changing core
@@ -34,23 +35,39 @@ code — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Shipped today:
 
-- **Codex CLI accounts.** Add a stored account via the vendor's own
-  `codex login`, switch the live `auth.json` behind a restorable backup,
-  and delete a stored copy without signing the tool out. Other adapters
-  list only.
-- **Listing.** Claude Code, Codex CLI, Grok CLI, and Gemini CLI (API-key
-  path only) can list what they can see, with identities masked.
+- **Account operations.** Codex CLI can add, switch, and delete stored copies.
+  Gemini API-key and Grok accounts can be selected for app-owned launches.
+  Gemini selection injects `GEMINI_API_KEY` only into the child; Grok selection
+  sets child-only `GROK_HOME` and removes inherited `GROK_AUTH_PATH`.
+- **Listing.** Claude Code, Codex CLI, Cursor CLI, Grok CLI, and Gemini CLI can
+  list their implemented account surfaces, with identities masked.
 - **Secure storage.** OS keychain first, encrypted file only as a
   fallback, for secrets this application itself stores. Stored Codex
   accounts are vendor-written files — see
   [`docs/adr/0008-vendor-written-auth-json-for-stored-codex-accounts.md`](docs/adr/0008-vendor-written-auth-json-for-stored-codex-accounts.md).
+- **Quota visibility.** The Dashboard has list and grid views and distinguishes
+  available, no-signal, and failed collection states. Every current provider
+  reports no numeric signal because none has a verified research basis.
+- **Relay.** A loopback listener exposes six OpenAI, Anthropic, and Gemini
+  paths. It implements all 12 ordered non-streaming text pairs, bounded
+  streaming on the routes listed in
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and OpenAI Images to and from
+  Gemini image translation.
+- **Routing.** Ordered, persisted model rules select one configured account
+  target per provider. Fallback occurs only after HTTP 429, and rule changes
+  apply on the next relay start.
 
-Specified for v1, not built yet:
+Still open for v1:
 
-- In-app OAuth 2.0 with PKCE, API-key intake, and automatic refresh.
-- Quota dashboard.
-- Local relay between OpenAI, Anthropic, and Gemini wire formats.
-- Smart routing with failover on rate limits.
+- `FR-2` remains incomplete; see
+  [`docs/ROADMAP.md`](docs/ROADMAP.md) for the implemented provider paths and
+  remaining safety bars.
+- Claude Code switching and Cursor mutation.
+- `FR-9` defaults, per-route overrides, and precedence.
+- Relay integration with provider-selected managed accounts and the deferred
+  real-agent end-to-end check.
+- Installable and signed release artifacts, including the headless Docker
+  image.
 
 The full requirement list, numbered and referenceable, is in
 [`docs/SPEC.md`](docs/SPEC.md).
@@ -83,6 +100,24 @@ npm run tauri:build
 Full prerequisites for every platform are in
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
+### Routed relay targets
+
+The desktop relay loads persisted rules when it starts. For every provider id
+named by those rules, configure one runtime environment group. Replace `<KEY>`
+with the provider id uppercased and with hyphens changed to underscores:
+
+| Variable                                              | Required | Value                                                                                                                                  |
+| ----------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `CODING_AGENT_MANAGER_RELAY_TARGET_<KEY>_URL`         | Yes      | Base URL ending in `/`, with no credentials, query, or fragment. Use HTTPS, except that HTTP is accepted for loopback hosts.           |
+| `CODING_AGENT_MANAGER_RELAY_TARGET_<KEY>_DIALECT`     | Yes      | One of `openai-chat-completions`, `openai-responses`, `openai-images-generations`, `anthropic-messages`, or `gemini-generate-content`. |
+| `CODING_AGENT_MANAGER_RELAY_TARGET_<KEY>_ACCOUNT_ID`  | Yes      | Nonempty account identifier for the provider target.                                                                                   |
+| `CODING_AGENT_MANAGER_RELAY_TARGET_<KEY>_AUTH_TOKEN`  | No       | Runtime-only upstream token.                                                                                                           |
+| `CODING_AGENT_MANAGER_RELAY_TARGET_<KEY>_AUTH_HEADER` | No       | Header name used with `_AUTH_TOKEN`. Omit it, or use `authorization`, for Bearer authentication.                                       |
+
+A partial group fails relay startup. `_AUTH_HEADER` without `_AUTH_TOKEN` also
+fails. These variables are runtime target configuration; they are not provider
+adapter account-selection integration.
+
 ## Documentation
 
 | Document                                           | What it covers                                        |
@@ -98,10 +133,10 @@ Full prerequisites for every platform are in
 
 ## Security
 
-This application handles other people's credentials, so it is built to a higher
-bar than a typical desktop utility: no telemetry, secrets never touch a log, the
-relay binds to loopback unless you explicitly say otherwise, and no config file
-is ever replaced without a recoverable backup. The reasoning is in
+This application handles credentials. Its controls include no telemetry,
+keeping secrets out of logs, binding the relay to loopback unless it is
+explicitly configured otherwise with an auth token, and using a recoverable
+backup for every managed-tool configuration replacement. The reasoning is in
 [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md); to report a vulnerability,
 see [`SECURITY.md`](SECURITY.md).
 
@@ -114,9 +149,9 @@ with [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 Coding Agent Manager is an independent implementation. It was inspired by the
 _problem_ that [`lbjlaq/Antigravity-Manager`][upstream] solves for a single
-vendor, and generalises it across every major coding agent. It shares no code,
-assets, or text with that project, and is not a fork of it. The reasoning is
-recorded in
+vendor, and applies a provider-adapter design across multiple coding agents. It
+shares no code, assets, or text with that project, and is not a fork of it. The
+reasoning is recorded in
 [`docs/adr/0006-clean-room-independent-implementation.md`](docs/adr/0006-clean-room-independent-implementation.md).
 
 [upstream]: https://github.com/lbjlaq/Antigravity-Manager

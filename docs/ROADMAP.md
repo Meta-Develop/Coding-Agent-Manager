@@ -16,7 +16,7 @@ worth implementing against.
 
 - Tauri v2 + React + TypeScript skeleton that builds and runs.
 - `ProviderAdapter` and `CredentialStore` contracts defined.
-- Five adapter modules stubbed, each carrying its researched config paths.
+- Five adapter modules registered, each carrying its researched config paths.
 - Full documentation set: spec, architecture, security model, research notes,
   ADRs.
 - CI on Linux, macOS, and Windows.
@@ -53,8 +53,8 @@ state is a single readable document.
 
 Satisfies: `FR-1`, `FR-2`, `FR-4`.
 
-M2 is not complete. Grok switching is not implemented, and the Codex
-switch is not proven against the vendor.
+The Grok implementation item is resolved, but M2 remains incomplete because the
+Codex switch and Grok launch path still need real vendor/account proof.
 
 Done:
 
@@ -64,25 +64,27 @@ Done:
   Maturity remains `experimental`. The adapter does not switch by
   relocating `CODEX_HOME` at launch, and it does not claim the vendor
   accepts a copied credential.
-- Grok CLI: read, list signed-in OIDC identities, honour `$GROK_HOME`,
-  detect the official CLI. Switch by relocating `$GROK_HOME` is not
-  implemented.
+- Grok CLI: read and list signed-in OIDC identities, detect the official CLI,
+  and manage retained vendor homes. Selection is non-secret metadata; an
+  app-owned child receives the selected `GROK_HOME` and has inherited
+  `GROK_AUTH_PATH` removed. The application does not relocate, copy, rewrite,
+  back up, or delete `auth.json`.
 - Accounts page: add, list, switch, and delete, gated on
-  `ProviderDescriptor.capabilities`, with confirmations. There is no
-  separate import or label editor. Switch verification is a re-read of
-  the written `auth.json`, not a probe of the tool or the vendor.
+  `ProviderDescriptor.capabilities`, with confirmations. It distinguishes the
+  active tool identity from the account selected for an app-owned launch.
 - Adapter contract suite over the registry, including a capability
   guard.
 
 Still open:
 
-- Grok CLI: switch by relocating `$GROK_HOME` per account, honouring
-  `auth.json.lock` and refusing while a session is active.
+- Real Codex and Grok checks in which each tool reports the expected identity.
+  Grok's pinned first-party source is `[verified-source]`, but that does not
+  claim the local binary matches that revision.
 
 **Exit criteria.** A real switch on a real machine, verified by the tool
 reporting the expected identity, with a working restore. Both adapters at
-`experimental`. Neither is met: Grok cannot switch, and the Codex switch
-has not been verified by the tool against the vendor.
+`experimental`. Both descriptors are `experimental`; local fake tests cover
+the implementation, but the real vendor/account checks have not been run.
 
 ---
 
@@ -98,12 +100,26 @@ Satisfies: `FR-1`, `FR-2` for two more providers.
 - Gemini CLI: API-key accounts via `GEMINI_API_KEY`. OAuth stays unimplemented
   until its credential path is `[verified-local]`.
 
+M3 is partial. Gemini API-key account management is implemented through
+`CredentialStore` and non-secret launch selection. The selected key is resolved
+only at child spawn, conflicting auth environment variables are removed, and
+the full tested configuration tree remains unchanged.
+
+Claude Code 2.1.212 research verified `[verified-local]` that the write identity
+is the top-level `claudeAiOauth` value in `.credentials.json` paired with the
+top-level `oauthAccount` value in `~/.claude.json`. The switch remains
+unimplemented. Its safety bar requires a paired backup, a durable journal with
+process-death recovery, fail-closed lock and process checks, surgical
+preservation of every other field, failure injection across write and recovery
+phases, and the full `FR-2` scope.
+
 **Exit criteria.** Claude Code switch preserves every machine-scoped field,
 proven by fixture diff. Gemini API-key switching works without touching a file.
+The Gemini criterion is met; the Claude criterion is not.
 
 ---
 
-## M4 — Quota visibility
+## M4 — Quota visibility ✅
 
 **Goal.** Show what is actually knowable, and nothing more.
 
@@ -113,8 +129,14 @@ Satisfies: `FR-5`, `NFR-8`.
 - Dashboard with list and grid views, plan labels, reset times, error states.
 - Explicit "no quota signal available" rendering — never a fabricated number.
 
+All five current adapters return an explicit empty snapshot vector because no
+numeric quota signal has a verified research basis. Claude Code may additionally
+show the non-credential `billingType` plan label. Snapshots are collected on
+demand and are not cached or persisted.
+
 **Exit criteria.** Every provider either shows a sourced number with its
-`capturedAt` age, or states that it publishes no signal.
+`capturedAt` age, or states that it publishes no signal. Met: the current state
+for every provider is no signal, and collection failures render separately.
 
 ---
 
@@ -130,13 +152,29 @@ Satisfies: `FR-6`, `FR-8`, `FR-9`.
 - Reasoning-budget mapping, with explicit errors on unmappable fields.
 - Non-loopback binding gated on an auth token, enforced and tested.
 
+M5 is partial. The implemented subset has six ingress paths, all 12 ordered
+non-streaming text-format pairs, and 74 golden cases. Supported streaming routes
+translate event by event. Cross-dialect streaming requests from OpenAI
+Responses and cross-dialect streaming targets to OpenAI Responses are explicit
+errors. Gemini-target tool-call streams that would require partial argument
+assembly are also rejected. Image translation is limited to OpenAI Images and
+Gemini; Anthropic image endpoints are rejected.
+
+Still open:
+
+- `FR-9` user defaults, per-route overrides, and precedence.
+- Integration between relay targets and provider-selected managed accounts.
+- A real coding agent driven through the relay against another provider. This
+  check is deferred because it requires real accounts.
+
 **Exit criteria.** Golden-file coverage for every case in
 [`TESTING.md`](TESTING.md) §5, and a real coding agent driven through the relay
-against a different vendor's account.
+against a different vendor's account. The golden-file criterion is met; the
+real-account criterion is deferred.
 
 ---
 
-## M6 — Routing
+## M6 — Routing ✅
 
 **Goal.** Spend the right account's quota.
 
@@ -147,8 +185,23 @@ Satisfies: `FR-7`.
 - Failover on rate-limit responses, with throttle-until tracking.
 - No implicit fallback: an unmatched request errors.
 
+Rules use case-sensitive exact or one trailing-`*` model match and select a
+provider plus target model. The native core stores the ordered document
+atomically in versioned `route-rules.json`; changes apply on the next relay
+start. Each selected provider must resolve to exactly one configured account
+target. Quota gates fail closed when M4 data is absent, failed, malformed, or
+irrelevant.
+
+Fallback occurs only after HTTP 429. Translation, network, and non-429 failures
+do not advance to another rule. The throttle deadline is the later usable
+numeric `Retry-After` or M4 reset, or 60 seconds when neither is available.
+Routed requests strip client credential and account-selection headers before
+injecting only the selected target authentication. The desktop path ignores the
+legacy singleton target variables.
+
 **Exit criteria.** A rate-limited account demonstrably fails over, and no
-request is ever served by an account no rule selected.
+request is ever served by an account no rule selected. Met by local fake
+acceptance tests; no real credential was used.
 
 ---
 
@@ -164,8 +217,18 @@ Satisfies: `FR-10`, and `FR-4` for Cursor.
   `.deb` / `.rpm` / AppImage, Docker image for the headless relay.
 - Release workflow producing checksummed artifacts.
 
+M7 is partial. Cursor detection and read-only Cursor CLI account listing through
+`cursor-agent status` are implemented. The adapter is `experimental`, masks the
+reported identity, and advertises no capabilities. Adding, switching, and
+deleting remain blocked until the credential store and write path are
+`[verified-local]`.
+
+Packaging and signing work did not land in this wave. Platform-specific Windows
+and macOS verification is blocked on the current NixOS host and remains for
+platform CI or matching hosts. The headless Docker artifact is unimplemented.
+
 **Exit criteria.** A user can install from a release artifact on each platform
-and complete a switch.
+and complete a switch. Not met.
 
 ---
 
