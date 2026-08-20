@@ -29,6 +29,40 @@ window on many Nix-provided GPU stacks.
 file that has never been `git add`ed produces
 `error: Path 'flake.nix' … is not tracked by Git`.
 
+### Installing on a Nix host
+
+Official GitHub release installers are not published yet (`FR-10` / M7). The
+Linux flake package wraps the release binary from the documented Tauri build
+and installs a desktop entry:
+
+```bash
+nix develop --command bash -lc 'npm ci && npm run tauri:build'
+nix hash file --sri "$CARGO_TARGET_DIR/release/coding-agent-manager"
+nix-store --add-fixed sha256 \
+  "$CARGO_TARGET_DIR/release/coding-agent-manager"
+```
+
+Put the SRI hash in `unwrappedSha256` in `flake.nix`, then:
+
+```bash
+nix build .#coding-agent-manager
+nix profile install .#coding-agent-manager
+```
+
+`packages.default` and `packages.coding-agent-manager` are the same output.
+Home Manager can take that output from this flake. The wrapper sets
+`WEBKIT_DISABLE_DMABUF_RENDERER=1`. If `CARGO_TARGET_DIR` is unset, the binary
+is `src-tauri/target/release/coding-agent-manager`.
+
+If the root filesystem is small, point `CARGO_TARGET_DIR`, `CARGO_HOME`, and
+the npm cache at a larger volume before `tauri:build`. Do not put those
+directories on `/`.
+
+On NixOS, `npm run tauri:build` with bundle target `all` may fail while
+producing the AppImage (`xdg-open` is not at `/usr/bin/xdg-open`). The
+release binary, `.deb`, and `.rpm` are already written before that step.
+The flake package wraps the binary, not the AppImage.
+
 ## 2. Commands
 
 | Command                           | What it does                                               |
