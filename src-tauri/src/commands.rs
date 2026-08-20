@@ -497,12 +497,15 @@ fn route_rules_write_error(issue: RouteRulesValidationError) -> Error {
     }
 }
 
-/// Start the relay with its safe default loopback configuration.
+/// Start the rule-driven relay with its safe default loopback configuration.
 ///
-/// No listener configuration or authentication token crosses the IPC boundary.
+/// Rules come only from the validated durable native document. No listener
+/// configuration, account target, or authentication token crosses IPC, and
+/// the legacy singleton target can never become an implicit fallback.
 #[tauri::command]
 pub async fn start_relay() -> Result<RelayStatus> {
-    relay::start_relay().await
+    let rules = load_route_rules(&route_rules_path()?)?;
+    relay::start_routed_relay(rules).await
 }
 
 /// Stop the relay listener and return its resulting state.
