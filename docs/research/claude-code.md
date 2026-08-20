@@ -42,7 +42,7 @@ observed 2.1.212 installation its only top-level key was `claudeAiOauth`:
     "scopes": ["<string>"],
     "subscriptionType": "<string>",
     "rateLimitTier": "<string>",
-  }
+  },
 }
 ```
 
@@ -78,8 +78,8 @@ flags `[verified-local]`. A key-and-type-only inspection found this shape for
     "organizationName": "<redacted>",
     "organizationType": "<string>",
     "organizationRateLimitTier": "<string>",
-    "userRateLimitTier": null
-  }
+    "userRateLimitTier": null,
+  },
 }
 ```
 
@@ -121,10 +121,10 @@ objects `[verified-local]`.
 
 The exact switch allowlist for 2.1.212 is `[verified-local]`:
 
-| File | Replace from stored account | Preserve from live file |
-| ---- | --------------------------- | ----------------------- |
+| File                          | Replace from stored account      | Preserve from live file      |
+| ----------------------------- | -------------------------------- | ---------------------------- |
 | `~/.claude/.credentials.json` | top-level `claudeAiOauth` object | every other top-level member |
-| `~/.claude.json` | top-level `oauthAccount` object | every other top-level member |
+| `~/.claude.json`              | top-level `oauthAccount` object  | every other top-level member |
 
 No other top-level field in `~/.claude.json` is account identity. In
 particular, `userID` and `machineID` have separate vendor `get-or-create`
