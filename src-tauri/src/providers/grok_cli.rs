@@ -19,26 +19,42 @@
 //!   availability; not confirmed to carry quota.
 //!
 //! `$GROK_HOME` relocates the whole client home when it is set and non-empty
-//! [verified-docs] (`docs/research/grok-cli.md` §2). `$GROK_AUTH_PATH`, when
+//! [verified-source] (`docs/research/grok-cli.md` §2). `$GROK_AUTH_PATH`, when
 //! set, overrides the credential file independently of that home — a
 //! relocated home does not move `auth.json`. Keys are not user identities:
 //! the default client id is a configuration constant, so a second login
 //! overwrites the first. A switch is therefore one home per account, not
 //! selecting an active map entry.
 //!
-//! `list_accounts` is read-only and returns only OIDC scopes that represent
-//! a signed-in identity. `activate_account` stays `NotImplemented` because
-//! there is no in-file selection mechanism, and the `$GROK_HOME` strategy
-//! is not implemented yet (`docs/research/grok-cli.md` §5).
+//! Manager-owned accounts keep each vendor-written home in place. Selection is
+//! non-secret metadata; core starts `grok` with `GROK_HOME` set to the selected
+//! derived home and removes `GROK_AUTH_PATH`. This adapter never copies,
+//! restores, rewrites, or deletes `auth.json`.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use fs2::FileExt;
+use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
+use zeroize::Zeroizing;
 
-use super::{binary_on_path, home_dir, ProviderAdapter};
+use super::{
+    account_id_is_safe, binary_on_path, home_dir, managed_account_dir, ActivationMechanism,
+    LaunchSpec, ManagedAccountPlan, ProviderAdapter, StoredAccountRegistry,
+};
 use crate::error::{Error, Result};
-use crate::model::{Account, AuthKind, InstallState, Maturity, ProviderDescriptor};
+use crate::model::{
+    Account, AuthKind, InstallState, Maturity, ProviderCapability, ProviderDescriptor,
+    StoredAccountMaterial, StoredAccountMetadata, StoredAccountState,
+};
+use crate::{fsx, paths};
 
 const PROVIDER_ID: &str = "grok-cli";
 
@@ -51,12 +67,25 @@ const PROVIDER_ID: &str = "grok-cli";
 /// (`docs/research/grok-cli.md` §3).
 const RESERVED_SCOPES: &[&str] = &["xai::api_key", "https://accounts.x.ai/sign-in"];
 
+type LoginRunner = fn(&Path) -> io::Result<i32>;
+
 #[derive(Debug, Default)]
 pub struct GrokCliAdapter {
     /// Injected home directory. `None` means the real user home, which is
     /// what production uses; tests pass a `tempfile::TempDir` path so no
     /// test can read a developer's real credentials (`docs/TESTING.md` §4).
     home: Option<PathBuf>,
+    /// Application data directory containing derived per-account homes.
+    /// Tests inject this so they never inspect or write production metadata.
+    data_dir: Option<PathBuf>,
+    /// Exact child working directory. Production resolves the app's current
+    /// directory; tests inject an isolated absolute directory.
+    working_directory: Option<PathBuf>,
+    /// `None` means the fixed production executable name `grok`.
+    program: Option<PathBuf>,
+    /// Test seam for interactive login. Production always inherits stdio and
+    /// starts the fixed `grok login` command itself.
+    login_runner: Option<LoginRunner>,
 }
 
 impl GrokCliAdapter {
@@ -64,7 +93,32 @@ impl GrokCliAdapter {
     pub fn with_home(home: impl Into<PathBuf>) -> Self {
         Self {
             home: Some(home.into()),
+            ..Self::default()
         }
+    }
+
+    /// Root manager metadata and vendor homes at `data_dir`.
+    pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(data_dir.into());
+        self
+    }
+
+    /// Set the exact absolute working directory used for login and launch.
+    pub fn with_working_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.working_directory = Some(directory.into());
+        self
+    }
+
+    /// Replace `grok` with an executable fixture while preserving fixed args.
+    pub fn with_program(mut self, program: impl Into<PathBuf>) -> Self {
+        self.program = Some(program.into());
+        self
+    }
+
+    /// Complete an isolated login without starting a real browser in tests.
+    pub fn with_login_runner(mut self, runner: LoginRunner) -> Self {
+        self.login_runner = Some(runner);
+        self
     }
 
     fn grok_home(&self) -> Option<PathBuf> {
@@ -82,6 +136,687 @@ impl GrokCliAdapter {
             std::env::var_os("GROK_AUTH_PATH").as_deref(),
             home_dir().as_deref(),
         )
+    }
+
+    fn resolved_data_dir(&self) -> Result<PathBuf> {
+        let directory = self.data_dir.clone().or_else(|| {
+            if self.home.is_some() {
+                // A fixture home alone must never make a unit or contract test
+                // discover the developer's real manager metadata.
+                None
+            } else {
+                paths::project_dirs().map(|dirs| dirs.data_dir().to_path_buf())
+            }
+        });
+        let directory =
+            directory.ok_or_else(|| config_write("application data directory unavailable"))?;
+        if !directory.is_absolute() {
+            return Err(config_write(
+                "application data directory is not an absolute path",
+            ));
+        }
+        Ok(directory)
+    }
+
+    fn resolved_working_directory(&self) -> Result<PathBuf> {
+        let directory = match &self.working_directory {
+            Some(directory) => directory.clone(),
+            None => std::env::current_dir().map_err(|error| {
+                config_write(format!(
+                    "launch working directory unavailable ({})",
+                    error.kind()
+                ))
+            })?,
+        };
+        if !directory.is_absolute() {
+            return Err(config_write("launch working directory is not absolute"));
+        }
+        let metadata = fs::symlink_metadata(&directory).map_err(|error| {
+            config_write(format!(
+                "launch working directory cannot be inspected ({})",
+                error.kind()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(config_write(
+                "launch working directory is not a non-symlink directory",
+            ));
+        }
+        Ok(directory)
+    }
+
+    fn managed_home(&self, account: &StoredAccountMetadata) -> Result<PathBuf> {
+        validate_managed_metadata(account)?;
+        Ok(managed_account_dir(
+            &self.resolved_data_dir()?,
+            PROVIDER_ID,
+            &account.id,
+        ))
+    }
+
+    fn program(&self) -> PathBuf {
+        self.program
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("grok"))
+    }
+
+    fn managed_metadata_accounts(&self) -> Result<Vec<Account>> {
+        let Some(data_dir) = self.data_dir.clone().or_else(|| {
+            if self.home.is_some() {
+                None
+            } else {
+                paths::project_dirs().map(|dirs| dirs.data_dir().to_path_buf())
+            }
+        }) else {
+            return Ok(Vec::new());
+        };
+        let registry = StoredAccountRegistry::new(paths::stored_accounts_path(&data_dir));
+        let mut accounts = registry
+            .load()?
+            .into_iter()
+            .filter(|account| account.provider_id == PROVIDER_ID)
+            .map(|account| {
+                let binding_matches = account.auth_kind == AuthKind::OAuth
+                    && account.material == StoredAccountMaterial::VendorHome;
+                Account {
+                    id: account.id,
+                    provider_id: account.provider_id,
+                    label: account.label,
+                    masked_identity: None,
+                    auth_kind: account.auth_kind,
+                    is_active: false,
+                    is_selected_for_launch: binding_matches
+                        && account.state == StoredAccountState::Complete
+                        && account.is_selected,
+                    is_stored: true,
+                    is_incomplete: !binding_matches
+                        || account.state != StoredAccountState::Complete,
+                    expires_at: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        accounts.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(accounts)
+    }
+
+    fn run_login(&self, managed_home: &Path) -> Result<()> {
+        let status = if let Some(runner) = self.login_runner {
+            runner(managed_home).map_err(|error| {
+                config_write(format!("grok login could not start ({})", error.kind()))
+            })?
+        } else {
+            Command::new(self.program())
+                .arg("login")
+                .current_dir(self.resolved_working_directory()?)
+                .env("GROK_HOME", managed_home)
+                .env_remove("GROK_AUTH_PATH")
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .map_err(|error| {
+                    config_write(format!("grok login could not start ({})", error.kind()))
+                })?
+                .code()
+                .unwrap_or(-1)
+        };
+        if status != 0 {
+            return Err(config_write(format!(
+                "grok login exited unsuccessfully (status {status})"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn config_write(reason: impl Into<String>) -> Error {
+    Error::ConfigWrite {
+        provider: PROVIDER_ID.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn validate_managed_metadata(account: &StoredAccountMetadata) -> Result<()> {
+    if account.provider_id != PROVIDER_ID {
+        return Err(Error::UnknownProvider(account.provider_id.clone()));
+    }
+    if !account_id_is_safe(&account.id) {
+        return Err(config_write("account id is not a safe path component"));
+    }
+    if account.material != StoredAccountMaterial::VendorHome || account.auth_kind != AuthKind::OAuth
+    {
+        return Err(config_write(
+            "stored account metadata does not match Grok OAuth vendor-home storage",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_directory(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| config_write(format!("{label} cannot be inspected ({})", error.kind())))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(config_write(format!(
+            "{label} is not a non-symlink directory"
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(config_write(format!("{label} is not owner-only")));
+        }
+    }
+    Ok(())
+}
+
+fn metadata_identity_matches(
+    left: &fs::Metadata,
+    right: &fs::Metadata,
+    label: &str,
+) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = label;
+        Ok((left.dev(), left.ino()) == (right.dev(), right.ino()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let left_identity = (left.volume_serial_number(), left.file_index());
+        let right_identity = (right.volume_serial_number(), right.file_index());
+        if left_identity.0.is_none() || left_identity.1.is_none() {
+            return Err(config_write(format!(
+                "{label} identity is unavailable on this volume"
+            )));
+        }
+        Ok(left_identity == right_identity)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (left, right);
+        Err(config_write(format!(
+            "{label} identity cannot be verified on this platform"
+        )))
+    }
+}
+
+fn ensure_private_managed_home(data_dir: &Path, home: &Path) -> Result<()> {
+    let accounts = data_dir.join("accounts");
+    let provider = accounts.join(PROVIDER_ID);
+    for (directory, label) in [
+        (data_dir, "application data directory"),
+        (accounts.as_path(), "managed accounts directory"),
+        (provider.as_path(), "Grok provider directory"),
+        (home, "managed Grok home"),
+    ] {
+        match fs::symlink_metadata(directory) {
+            Ok(_) => validate_directory(directory, label)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fsx::create_dir_all_private(directory)?;
+                validate_directory(directory, label)?;
+            }
+            Err(error) => {
+                return Err(config_write(format!(
+                    "{label} cannot be inspected ({})",
+                    error.kind()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+struct JsonObjectShape;
+
+struct StringShape;
+
+impl<'de> Deserialize<'de> for StringShape {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StringVisitor;
+
+        impl<'de> Visitor<'de> for StringVisitor {
+            type Value = StringShape;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_borrowed_str<E>(
+                self,
+                _value: &'de str,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(StringShape)
+            }
+
+            fn visit_str<E>(self, _value: &str) -> std::result::Result<Self::Value, E> {
+                Ok(StringShape)
+            }
+
+            fn visit_string<E>(self, mut value: String) -> std::result::Result<Self::Value, E> {
+                use zeroize::Zeroize;
+                value.zeroize();
+                Ok(StringShape)
+            }
+        }
+
+        deserializer.deserialize_str(StringVisitor)
+    }
+}
+
+struct OAuthEntryShape {
+    has_required_strings: bool,
+}
+
+impl<'de> Deserialize<'de> for OAuthEntryShape {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EntryVisitor;
+
+        impl<'de> Visitor<'de> for EntryVisitor {
+            type Value = OAuthEntryShape;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an OAuth account object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut issuer = false;
+                let mut client_id = false;
+                let mut refresh_token = false;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "oidc_issuer" => {
+                            let _ = map.next_value::<StringShape>()?;
+                            issuer = true;
+                        }
+                        "oidc_client_id" => {
+                            let _ = map.next_value::<StringShape>()?;
+                            client_id = true;
+                        }
+                        "refresh_token" => {
+                            let _ = map.next_value::<StringShape>()?;
+                            refresh_token = true;
+                        }
+                        _ => {
+                            let _ = map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(OAuthEntryShape {
+                    has_required_strings: issuer && client_id && refresh_token,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(EntryVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonObjectShape {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ObjectVisitor;
+
+        impl<'de> Visitor<'de> for ObjectVisitor {
+            type Value = JsonObjectShape;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut has_oauth_entry = false;
+                while let Some(key) = map.next_key::<String>()? {
+                    if is_oidc_identity_scope(&key) {
+                        has_oauth_entry |=
+                            map.next_value::<OAuthEntryShape>()?.has_required_strings;
+                    } else {
+                        let _ = map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                if !has_oauth_entry {
+                    return Err(A::Error::custom(
+                        "no OAuth identity entry with required string fields",
+                    ));
+                }
+                Ok(JsonObjectShape)
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor)
+    }
+}
+
+fn validate_auth_json(home: &Path) -> Result<()> {
+    let path = home.join("auth.json");
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        config_write(format!(
+            "managed auth.json cannot be inspected ({})",
+            error.kind()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(config_write(
+            "managed auth.json is not a regular non-symlink file",
+        ));
+    }
+    let mut file = File::open(&path).map_err(|error| {
+        config_write(format!(
+            "managed auth.json cannot be opened ({})",
+            error.kind()
+        ))
+    })?;
+    validate_open_file_identity(&file, &path, "managed auth.json")?;
+    // Parse only keys and structure. Values are deserialized as `IgnoredAny`,
+    // and the transient byte buffer is zeroed on every return path.
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.read_to_end(&mut bytes).map_err(|error| {
+        config_write(format!(
+            "managed auth.json cannot be read ({})",
+            error.kind()
+        ))
+    })?;
+    validate_open_file_identity(&file, &path, "managed auth.json")?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+    JsonObjectShape::deserialize(&mut deserializer)
+        .and_then(|_| deserializer.end())
+        .map_err(|_| config_write("managed auth.json is not exactly one JSON object"))
+}
+
+#[derive(Deserialize)]
+struct ActiveSession {
+    session_id: String,
+    pid: u64,
+    cwd: String,
+    opened_at: String,
+}
+
+enum PidState {
+    Live,
+    Dead,
+    Unknown,
+}
+
+fn pid_state(pid: u32) -> PidState {
+    if pid == std::process::id() {
+        return PidState::Live;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match fs::metadata(Path::new("/proc").join(pid.to_string())) {
+            Ok(_) => PidState::Live,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => PidState::Dead,
+            Err(_) => PidState::Unknown,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        PidState::Unknown
+    }
+}
+
+fn check_active_sessions(home: &Path) -> Result<()> {
+    let path = home.join("active_sessions.json");
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(config_write(format!(
+                "active session registry cannot be inspected ({})",
+                error.kind()
+            )))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(config_write(
+            "active session registry is not a regular non-symlink file",
+        ));
+    }
+    let mut file = File::open(&path).map_err(|error| {
+        config_write(format!(
+            "active session registry cannot be opened ({})",
+            error.kind()
+        ))
+    })?;
+    validate_open_file_identity(&file, &path, "active session registry")?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|error| {
+        config_write(format!(
+            "active session registry cannot be read ({})",
+            error.kind()
+        ))
+    })?;
+    validate_open_file_identity(&file, &path, "active session registry")?;
+    let sessions: Vec<ActiveSession> = serde_json::from_slice(&bytes)
+        .map_err(|_| config_write("active session registry is malformed"))?;
+    for session in sessions {
+        if session.session_id.is_empty()
+            || session.cwd.is_empty()
+            || time::OffsetDateTime::parse(
+                &session.opened_at,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .is_err()
+            || session.pid == 0
+            || session.pid > u64::from(u32::MAX)
+        {
+            return Err(config_write(
+                "active session registry contains an invalid session",
+            ));
+        }
+        match pid_state(session.pid as u32) {
+            PidState::Live => {
+                return Err(config_write(
+                    "a Grok session recorded for this home is still active",
+                ))
+            }
+            PidState::Dead => {}
+            PidState::Unknown => {
+                return Err(config_write(
+                    "a Grok session PID could not be verified as stopped",
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_open_file_identity(file: &File, path: &Path, label: &str) -> Result<()> {
+    let path_metadata = fs::symlink_metadata(path)
+        .map_err(|error| config_write(format!("{label} cannot be rechecked ({})", error.kind())))?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+        return Err(config_write(format!(
+            "{label} is not a regular non-symlink file"
+        )));
+    }
+    let handle_metadata = file.metadata().map_err(|error| {
+        config_write(format!(
+            "{label} identity cannot be read ({})",
+            error.kind()
+        ))
+    })?;
+    if !metadata_identity_matches(&path_metadata, &handle_metadata, label)? {
+        return Err(config_write(format!(
+            "{label} was replaced during validation"
+        )));
+    }
+    Ok(())
+}
+
+static ACTIVE_HOME_OPERATIONS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+struct HomeOperationGuard {
+    home: PathBuf,
+}
+
+impl HomeOperationGuard {
+    fn acquire(home: &Path) -> Result<Self> {
+        let mut active = active_home_operations()?;
+        if !active.insert(home.to_path_buf()) {
+            return Err(config_write(
+                "another manager operation is already using this Grok home",
+            ));
+        }
+        Ok(Self {
+            home: home.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for HomeOperationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = active_home_operations() {
+            active.remove(&self.home);
+        }
+    }
+}
+
+fn active_home_operations() -> Result<MutexGuard<'static, HashSet<PathBuf>>> {
+    ACTIVE_HOME_OPERATIONS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map_err(|_| config_write("Grok home operation lock is poisoned"))
+}
+
+struct ExistingFileLock {
+    path: PathBuf,
+    file: File,
+}
+
+impl ExistingFileLock {
+    fn acquire(path: &Path, label: &str) -> Result<Option<Self>> {
+        let before = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(config_write(format!(
+                    "{label} cannot be inspected ({})",
+                    error.kind()
+                )))
+            }
+        };
+        if before.file_type().is_symlink() || !before.is_file() {
+            return Err(config_write(format!(
+                "{label} is not a regular non-symlink file"
+            )));
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| {
+                config_write(format!("{label} cannot be opened ({})", error.kind()))
+            })?;
+        FileExt::try_lock_exclusive(&file).map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                config_write(format!("{label} is held by another process"))
+            } else {
+                config_write(format!("{label} cannot be locked ({})", error.kind()))
+            }
+        })?;
+        let held = Self {
+            path: path.to_path_buf(),
+            file,
+        };
+        held.validate_identity(label)?;
+        Ok(Some(held))
+    }
+
+    fn validate_identity(&self, label: &str) -> Result<()> {
+        let path_metadata = fs::symlink_metadata(&self.path).map_err(|error| {
+            config_write(format!("{label} changed while locked ({})", error.kind()))
+        })?;
+        if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+            return Err(config_write(format!("{label} changed while locked")));
+        }
+        let handle_metadata = self.file.metadata().map_err(|error| {
+            config_write(format!(
+                "{label} identity cannot be read ({})",
+                error.kind()
+            ))
+        })?;
+        if !metadata_identity_matches(&path_metadata, &handle_metadata, label)? {
+            return Err(config_write(format!("{label} was replaced while locked")));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ExistingFileLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn gate_managed_home(home: &Path, require_auth: bool) -> Result<()> {
+    validate_directory(home, "managed Grok home")?;
+    let home_before = fs::symlink_metadata(home).map_err(|error| {
+        config_write(format!(
+            "managed Grok home cannot be inspected ({})",
+            error.kind()
+        ))
+    })?;
+    let auth_lock = ExistingFileLock::acquire(&home.join("auth.json.lock"), "Grok auth lock")?;
+    let sessions_lock = ExistingFileLock::acquire(
+        &home.join("active_sessions.lock"),
+        "Grok active-session lock",
+    )?;
+    check_active_sessions(home)?;
+    if require_auth {
+        validate_auth_json(home)?;
+    }
+    if let Some(lock) = sessions_lock.as_ref() {
+        lock.validate_identity("Grok active-session lock")?;
+    } else {
+        ensure_lock_still_absent(
+            &home.join("active_sessions.lock"),
+            "Grok active-session lock",
+        )?;
+    }
+    if let Some(lock) = auth_lock.as_ref() {
+        lock.validate_identity("Grok auth lock")?;
+    } else {
+        ensure_lock_still_absent(&home.join("auth.json.lock"), "Grok auth lock")?;
+    }
+    validate_directory(home, "managed Grok home")?;
+    let home_after = fs::symlink_metadata(home).map_err(|error| {
+        config_write(format!(
+            "managed Grok home cannot be rechecked ({})",
+            error.kind()
+        ))
+    })?;
+    if !metadata_identity_matches(&home_before, &home_after, "managed Grok home")? {
+        return Err(config_write(
+            "managed Grok home was replaced during validation",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_lock_still_absent(path: &Path, label: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(config_write(format!("{label} appeared during validation"))),
+        Err(error) => Err(config_write(format!(
+            "{label} cannot be rechecked ({})",
+            error.kind()
+        ))),
     }
 }
 
@@ -291,28 +1026,45 @@ impl ProviderAdapter for GrokCliAdapter {
             display_name: "Grok CLI".to_string(),
             vendor: "xAI".to_string(),
             auth_kinds: vec![AuthKind::OAuth, AuthKind::ApiKey],
-            // Experimental: `list_accounts` works, `activate_account` does
-            // not. `Supported` would overstate the adapter (`NFR-8`);
-            // `descriptors_never_claim_more_maturity_than_implemented`
-            // enforces the related rule.
+            // Environment selection is implemented for app-owned launches,
+            // but the pinned source has not been matched to the host binary.
+            // Keep maturity experimental while advertising only real paths.
             maturity: Maturity::Experimental,
             install_state: self.detect(),
-            capabilities: Vec::new(),
+            capabilities: vec![
+                ProviderCapability::AddAccount,
+                ProviderCapability::SwitchAccount,
+                ProviderCapability::DeleteAccount,
+                ProviderCapability::LaunchTool,
+            ],
         }
     }
 
     fn config_paths(&self) -> Vec<PathBuf> {
-        // `auth.json.lock` and `active_sessions.json` exist [verified-local]
-        // (`docs/research/grok-cli.md` §5, §8; `docs/ARCHITECTURE.md` §8).
-        // A future `activate_account` must acquire the lock the way the CLI
-        // does and refuse a switch while a session is running. This adapter
-        // does not write, so those paths stay off this list.
-        resolve_config_paths(
+        let mut config_paths = resolve_config_paths(
             self.home.as_deref(),
             std::env::var_os("GROK_HOME").as_deref(),
             std::env::var_os("GROK_AUTH_PATH").as_deref(),
             home_dir().as_deref(),
-        )
+        );
+        if let Ok(data_dir) = self.resolved_data_dir() {
+            let registry = StoredAccountRegistry::new(paths::stored_accounts_path(&data_dir));
+            if let Ok(accounts) = registry.load() {
+                for account in accounts
+                    .into_iter()
+                    .filter(|account| account.provider_id == PROVIDER_ID)
+                {
+                    let home = managed_account_dir(&data_dir, PROVIDER_ID, &account.id);
+                    config_paths.extend([
+                        home.join("auth.json"),
+                        home.join("auth.json.lock"),
+                        home.join("active_sessions.json"),
+                        home.join("active_sessions.lock"),
+                    ]);
+                }
+            }
+        }
+        config_paths
     }
 
     fn detect(&self) -> InstallState {
@@ -335,57 +1087,138 @@ impl ProviderAdapter for GrokCliAdapter {
         }
     }
 
-    /// Signed-in OIDC identities visible in `auth.json`.
+    /// Signed-in OIDC identities visible in the default `auth.json`, followed
+    /// by manager-owned non-secret metadata rows.
     ///
     /// Reserved scopes (`xai::api_key`, the legacy pre-OIDC key) are
     /// skipped: they are not user identities (`docs/research/grok-cli.md`
-    /// §3). Every returned account has `is_active: false`. There is no
-    /// in-file selection; `$GROK_HOME` is the vendor switch and is not
-    /// implemented yet (`docs/research/grok-cli.md` §5). `NFR-8` forbids
-    /// marking an entry active.
+    /// §3). Every returned account has `is_active: false`: launch selection is
+    /// surfaced separately and makes no claim about external shells.
     fn list_accounts(&self) -> Result<Vec<Account>> {
-        let Some(path) = self.auth_json_path() else {
-            return Ok(Vec::new());
-        };
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) => {
-                return Err(config_read(format!(
-                    "auth.json could not be read ({})",
-                    err.kind()
-                )));
+        let mut accounts = Vec::new();
+        if let Some(path) = self.auth_json_path() {
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => Some(bytes),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+                Err(err) => {
+                    return Err(config_read(format!(
+                        "auth.json could not be read ({})",
+                        err.kind()
+                    )));
+                }
+            };
+            if let Some(bytes) = bytes {
+                let value: Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| config_read("auth.json is not valid JSON"))?;
+                let Some(map) = value.as_object() else {
+                    return Err(config_read(
+                        "auth.json is not a JSON object keyed by provider scope",
+                    ));
+                };
+
+                // Sort explicitly so two identities always come back in the
+                // same order regardless of serde_json map representation.
+                let mut keys: Vec<&String> = map
+                    .keys()
+                    .filter(|key| is_oidc_identity_scope(key))
+                    .collect();
+                keys.sort();
+                accounts.reserve(keys.len());
+                for key in keys {
+                    accounts.push(account_from_entry(key, &map[key])?);
+                }
             }
-        };
-
-        let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| config_read("auth.json is not valid JSON"))?;
-        let Some(map) = value.as_object() else {
-            return Err(config_read(
-                "auth.json is not a JSON object keyed by provider scope",
-            ));
-        };
-
-        // serde_json::Map is a BTreeMap unless the `preserve_order` feature
-        // is on, and a HashMap round-trip would shuffle keys. Sort
-        // explicitly so two identities always come back in the same order.
-        let mut keys: Vec<&String> = map
-            .keys()
-            .filter(|key| is_oidc_identity_scope(key))
-            .collect();
-        keys.sort();
-
-        let mut accounts = Vec::with_capacity(keys.len());
-        for key in keys {
-            accounts.push(account_from_entry(key, &map[key])?);
         }
+        accounts.extend(self.managed_metadata_accounts()?);
         Ok(accounts)
     }
 
+    fn activation_mechanism(&self) -> ActivationMechanism {
+        ActivationMechanism::LaunchEnvironment
+    }
+
+    fn launch_spec(&self, account: &StoredAccountMetadata) -> Result<LaunchSpec> {
+        if account.state != StoredAccountState::Complete {
+            return Err(Error::UnknownAccount(account.id.clone()));
+        }
+        let home = self.managed_home(account)?;
+        let _operation = HomeOperationGuard::acquire(&home)?;
+        gate_managed_home(&home, true)?;
+        Ok(LaunchSpec::new(self.program())
+            .current_dir(self.resolved_working_directory()?)
+            .set_plain_env("GROK_HOME", home.as_os_str())
+            .remove_env("GROK_AUTH_PATH"))
+    }
+
+    fn managed_account_plan(&self) -> Option<ManagedAccountPlan> {
+        Some(ManagedAccountPlan {
+            auth_kind: AuthKind::OAuth,
+            material: StoredAccountMaterial::VendorHome,
+        })
+    }
+
+    fn provision_stored_account(
+        &self,
+        account: &StoredAccountMetadata,
+    ) -> Result<Option<crate::storage::Secret>> {
+        validate_managed_metadata(account)?;
+        if account.state != StoredAccountState::Pending {
+            return Err(config_write("Grok account is not pending provisioning"));
+        }
+        let home = self.managed_home(account)?;
+        let _operation = HomeOperationGuard::acquire(&home)?;
+        ensure_private_managed_home(&self.resolved_data_dir()?, &home)?;
+
+        match fs::symlink_metadata(home.join("auth.json")) {
+            Ok(_) => {
+                // Recovery seam: a crash after vendor login but before core's
+                // complete write can revalidate without spending credentials
+                // or starting a second login. Core does not yet call this seam
+                // automatically for preserved pending vendor homes.
+                gate_managed_home(&home, true)?;
+                return Ok(None);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(config_write(format!(
+                    "managed auth.json cannot be inspected ({})",
+                    error.kind()
+                )))
+            }
+        }
+
+        gate_managed_home(&home, false)?;
+        self.run_login(&home)?;
+        gate_managed_home(&home, true)?;
+        Ok(None)
+    }
+
+    fn validate_stored_account_delete(&self, account: &StoredAccountMetadata) -> Result<()> {
+        validate_managed_metadata(account)?;
+        let home = self.managed_home(account)?;
+        match fs::symlink_metadata(&home) {
+            Ok(_) => {
+                let _operation = HomeOperationGuard::acquire(&home)?;
+                // Delete means forget metadata. The vendor home and auth file
+                // remain byte-for-byte in place, including for pending rows.
+                gate_managed_home(&home, false)
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && account.state == StoredAccountState::Pending =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(config_write(format!(
+                "managed Grok home cannot be inspected ({})",
+                error.kind()
+            ))),
+        }
+    }
+
     fn activate_account(&self, _account_id: &str) -> Result<()> {
-        // There is no in-file selection among map keys. The vendor switch
-        // is `$GROK_HOME`, which this adapter does not implement yet
-        // (`docs/research/grok-cli.md` §5).
+        // Core owns environment selection; there is intentionally no in-file
+        // activation path for this adapter.
         Err(Error::NotImplemented("grok-cli::activate_account"))
     }
 }
@@ -616,10 +1449,19 @@ mod tests {
         let accounts = adapter.list_accounts().expect("list_accounts");
 
         let got = serde_json::to_value(&accounts).expect("serialize");
-        let expected: Value = serde_json::from_str(include_str!(
+        let mut expected: Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/grok-cli/expected/accounts.json"
         ))
         .expect("expected/accounts.json");
+        for account in expected
+            .as_array_mut()
+            .expect("expected Grok account array")
+        {
+            account
+                .as_object_mut()
+                .expect("expected Grok account object")
+                .insert("isSelectedForLaunch".to_string(), Value::Bool(false));
+        }
         assert_eq!(got, expected);
 
         assert_eq!(accounts.len(), 2);
