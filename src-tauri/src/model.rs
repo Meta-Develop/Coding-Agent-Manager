@@ -157,20 +157,64 @@ pub enum QuotaSource {
     LocalFile,
     Api,
     Header,
-    Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaSnapshot {
     pub account_id: String,
     pub model: Option<String>,
-    /// Fraction of the window consumed, 0.0..=1.0, or `None` when the provider
-    /// exposes no usable signal. Never fabricate a value here.
-    pub utilization: Option<f32>,
+    /// Fraction of the window consumed, 0.0..=1.0.
+    ///
+    /// Absence is represented by an empty provider collection, never by a
+    /// snapshot without a number.
+    pub utilization: f32,
+    /// Provider-published rate-limit window, when available.
+    pub window_label: Option<String>,
     pub resets_at: Option<String>,
     pub captured_at: String,
     pub source: QuotaSource,
+}
+
+/// Per-provider result of quota collection.
+///
+/// Every registry adapter gets one row. This keeps "no signal" distinct from
+/// a failed collection and prevents one adapter error from blanking the rest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderQuotaList {
+    pub provider_id: String,
+    pub plan_label: Option<String>,
+    pub snapshots: Vec<QuotaSnapshot>,
+    pub outcome: QuotaListOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum QuotaListOutcome {
+    /// At least one validated, sourced numeric snapshot is present.
+    Available,
+    /// The provider publishes no usable quota signal.
+    NoSignal,
+    /// Collection failed or an adapter returned an invalid snapshot.
+    Failed { error: QuotaListError },
+}
+
+/// Secret-free quota collection error surfaced to the dashboard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaListError {
+    pub kind: QuotaListErrorKind,
+    pub path: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuotaListErrorKind {
+    ConfigRead,
+    InvalidSnapshot,
+    Other,
 }
 
 /// Secret-free relay state exposed to the webview.
@@ -440,9 +484,59 @@ mod tests {
             serde_json::to_string(&QuotaSource::Header).unwrap(),
             r#""header""#
         );
+    }
+
+    #[test]
+    fn provider_quota_wire_shape_keeps_no_signal_explicit() {
+        let quota = ProviderQuotaList {
+            provider_id: "codex-cli".to_string(),
+            plan_label: None,
+            snapshots: Vec::new(),
+            outcome: QuotaListOutcome::NoSignal,
+        };
         assert_eq!(
-            serde_json::to_string(&QuotaSource::Unknown).unwrap(),
-            r#""unknown""#
+            serde_json::to_value(&quota).unwrap(),
+            serde_json::json!({
+                "providerId": "codex-cli",
+                "planLabel": null,
+                "snapshots": [],
+                "outcome": { "kind": "no-signal" }
+            })
+        );
+    }
+
+    #[test]
+    fn quota_snapshot_wire_shape_requires_a_number_and_window() {
+        let quota = ProviderQuotaList {
+            provider_id: "example".to_string(),
+            plan_label: Some("Example plan".to_string()),
+            snapshots: vec![QuotaSnapshot {
+                account_id: "work".to_string(),
+                model: Some("example-model".to_string()),
+                utilization: 0.25,
+                window_label: Some("5 hours".to_string()),
+                resets_at: Some("2030-01-01T00:00:00Z".to_string()),
+                captured_at: "2029-12-31T23:00:00Z".to_string(),
+                source: QuotaSource::LocalFile,
+            }],
+            outcome: QuotaListOutcome::Available,
+        };
+        assert_eq!(
+            serde_json::to_value(&quota).unwrap(),
+            serde_json::json!({
+                "providerId": "example",
+                "planLabel": "Example plan",
+                "snapshots": [{
+                    "accountId": "work",
+                    "model": "example-model",
+                    "utilization": 0.25,
+                    "windowLabel": "5 hours",
+                    "resetsAt": "2030-01-01T00:00:00Z",
+                    "capturedAt": "2029-12-31T23:00:00Z",
+                    "source": "local-file"
+                }],
+                "outcome": { "kind": "available" }
+            })
         );
     }
 
