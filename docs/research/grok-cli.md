@@ -18,15 +18,19 @@ that tree. It is not a second on-host observation of the 0.2.93 binary.
 Findings from the tree describe the published source. They do not, by
 themselves, prove that this host's binary matches it.
 
-First-party source is official vendor documentation of the on-disk contract, so
-claims from it are marked `[verified-docs]`. That is not the same as
-`[verified-local]` against this host's binary: the tree can lag the shipped
-CLI.
+Claims established by inspecting first-party Rust source at the pinned revision
+are marked `[verified-source]`. Claims stated in the repository README or
+shipped user guide remain `[verified-docs]`. Neither marker is the same as
+`[verified-local]` against this host's binary: the tree can lag the shipped CLI.
 
-Evidence for every `[verified-docs]` claim below that cites this tree:
+Pinned-source provenance and documentation:
 
 - https://raw.githubusercontent.com/xai-org/grok-build/d92c5b0b8582fda358de1f97446aa74af44a464f/README.md
 - https://raw.githubusercontent.com/xai-org/grok-build/d92c5b0b8582fda358de1f97446aa74af44a464f/SOURCE_REV
+- https://raw.githubusercontent.com/xai-org/grok-build/d92c5b0b8582fda358de1f97446aa74af44a464f/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
+
+Code evidence for every `[verified-source]` claim below:
+
 - https://raw.githubusercontent.com/xai-org/grok-build/d92c5b0b8582fda358de1f97446aa74af44a464f/crates/codegen/xai-grok-shell/src/auth/model.rs
 - https://raw.githubusercontent.com/xai-org/grok-build/d92c5b0b8582fda358de1f97446aa74af44a464f/crates/codegen/xai-grok-shell/src/auth/config.rs
 - https://raw.githubusercontent.com/xai-org/grok-build/d92c5b0b8582fda358de1f97446aa74af44a464f/crates/codegen/xai-grok-shell/src/auth/manager.rs
@@ -35,35 +39,34 @@ Evidence for every `[verified-docs]` claim below that cites this tree:
 - https://raw.githubusercontent.com/xai-org/grok-build/d92c5b0b8582fda358de1f97446aa74af44a464f/crates/codegen/xai-grok-shell/src/auth/recovery.rs
 - https://raw.githubusercontent.com/xai-org/grok-build/d92c5b0b8582fda358de1f97446aa74af44a464f/crates/codegen/xai-grok-home/src/lib.rs
 - https://raw.githubusercontent.com/xai-org/grok-build/d92c5b0b8582fda358de1f97446aa74af44a464f/crates/codegen/xai-grok-active-sessions/src/lib.rs
-- https://raw.githubusercontent.com/xai-org/grok-build/d92c5b0b8582fda358de1f97446aa74af44a464f/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md
 
 ## 2. Config locations
 
 The grok home is `$GROK_HOME` when that variable is set and non-empty,
 otherwise `<home>/.grok`. The env value is returned verbatim, not
-canonicalized `[verified-docs]`. On this host the default home
+canonicalized `[verified-source]`. On this host the default home
 `~/.grok` is what was listed `[verified-local]`. `$GROK_HOME` itself was
 not exercised against 0.2.93.
 
-| Path                                                                       | Purpose                                   | Marker             |
-| -------------------------------------------------------------------------- | ----------------------------------------- | ------------------ |
-| `$GROK_HOME` or `~/.grok`                                                  | Whole client home                         | `[verified-docs]`  |
-| `~/.grok/auth.json`                                                        | Credentials, keyed per provider scope     | `[verified-local]` |
-| `~/.grok/auth.json.lock`                                                   | Advisory lock for the above               | `[verified-local]` |
-| `~/.grok/config.toml`                                                      | Client configuration, marketplace sources | `[verified-local]` |
-| `~/.grok/managed_config.lock`, `.config-init.lock`                         | Config locks                              | `[verified-local]` |
-| `~/.grok/active_sessions.json`                                             | Running session registry                  | `[verified-local]` |
-| `~/.grok/active_sessions.lock`                                             | Lock for that registry                    | `[verified-local]` |
-| `~/.grok/models_cache.json`                                                | Cached model list                         | `[verified-local]` |
-| `~/.grok/agent_id`, `sessions/`, `logs/`, `skills/`, `bundled/`, `vendor/` | Client state                              | `[verified-local]` |
+| Path                                                                       | Purpose                                   | Marker              |
+| -------------------------------------------------------------------------- | ----------------------------------------- | ------------------- |
+| `$GROK_HOME` or `~/.grok`                                                  | Whole client home                         | `[verified-source]` |
+| `~/.grok/auth.json`                                                        | Credentials, keyed per provider scope     | `[verified-local]`  |
+| `~/.grok/auth.json.lock`                                                   | Advisory lock for the above               | `[verified-local]`  |
+| `~/.grok/config.toml`                                                      | Client configuration, marketplace sources | `[verified-local]`  |
+| `~/.grok/managed_config.lock`, `.config-init.lock`                         | Config locks                              | `[verified-local]`  |
+| `~/.grok/active_sessions.json`                                             | Running session registry                  | `[verified-local]`  |
+| `~/.grok/active_sessions.lock`                                             | Lock for that registry                    | `[verified-local]`  |
+| `~/.grok/models_cache.json`                                                | Cached model list                         | `[verified-local]`  |
+| `~/.grok/agent_id`, `sessions/`, `logs/`, `skills/`, `bundled/`, `vendor/` | Client state                              | `[verified-local]`  |
 
 The session lock file is named `active_sessions.lock`, not
-`active_sessions.json.lock` `[verified-docs]`. An earlier reading of the
+`active_sessions.json.lock` `[verified-source]`. An earlier reading of the
 local listing as `active_sessions.json` plus `.lock` was ambiguous on that
 point.
 
 `$GROK_AUTH_PATH`, when set, overrides the `auth.json` path independently of
-the grok home `[verified-docs]`. A `$GROK_HOME` relocation then no longer
+the grok home `[verified-source]`. A `$GROK_HOME` relocation then no longer
 moves the credential file.
 
 macOS is expected to use the same `~/.grok` layout `[inferred]`. Windows is
@@ -75,11 +78,11 @@ a real host.
 `~/.grok/auth.json` `[verified-local]` is a JSON object whose keys look like
 `"<oidc-issuer>::<client-uuid>"`. That observation still holds. The keys are
 not user identities. They are **provider scopes** computed from configuration
-as `"{issuer}::{client_id}"` `[verified-docs]`. `AuthStore` is a map from
+as `"{issuer}::{client_id}"` `[verified-source]`. `AuthStore` is a map from
 scope string to `GrokAuth`. `AuthManager` computes one scope at construction
 and every read, write, and clear of the session token targets that single key.
 
-Reserved non-OIDC keys also exist in the same file `[verified-docs]`:
+Reserved non-OIDC keys also exist in the same file `[verified-source]`:
 
 - `xai::api_key` — plain API-key auth (`grok login --api-key`, desktop login).
 - `https://accounts.x.ai/sign-in` — legacy pre-OIDC scope. A WebLogin token
@@ -91,7 +94,7 @@ is a configuration constant, not a property of the signed-in user, so two
 different xAI accounts compute the same `"{issuer}::{client_id}"` key. A
 team principal and a personal principal also produce the same base scope.
 Logging in as a second account therefore overwrites the first
-`[verified-docs]`.
+`[verified-source]`.
 
 On-host shape, key names only `[verified-local]`:
 
@@ -132,10 +135,11 @@ locally observable `[verified-local]`.
 
 `grok login` starts the sign-in flow again and **replaces** the cached
 session. `grok logout` clears cached credentials
-`[verified-docs]`. There is no "select a different map entry" command.
+`[verified-docs]`. There is no "select a different map entry" command
+`[verified-source]`.
 
 An API-key mode is first-class: `AuthMode::ApiKey`, the `xai::api_key` scope,
-and `XAI_API_KEY` `[verified-docs]`. The earlier inference from the
+and `XAI_API_KEY` `[verified-source]`. The earlier inference from the
 `auth_mode` field name is now backed by vendor source and the user guide.
 
 Grok refreshes access tokens automatically in the background. Credentials
@@ -157,7 +161,7 @@ CLI selects an active identity. The observation of several keys was right.
 The interpretation was wrong. The CLI does not pick among user identities in
 that map. It reads and writes one provider-scope key. A second login overwrites
 that key. Switching by marking a different entry active is not a mechanism
-this tool has `[verified-docs]`.
+this tool has `[verified-source]`.
 
 `$GROK_HOME` is the switching mechanism worth designing around. Keep one grok
 home per account and point the environment variable at the right one. That
@@ -174,12 +178,12 @@ process is running, or that restores a snapshot onto a home that process is
 using, can brick the account. Refuse the write.
 
 Under `.agents/docs/PROJECT_RULES.md`, a write path may depend only on
-`[verified-local]` or `[verified-docs]` claims. A write path may rest on
-pointing `$GROK_HOME` at a per-account directory that already contains that
-account's `auth.json`, because the vendor home crate is the single source of
-truth and returns a non-empty `$GROK_HOME` verbatim. It may not rest on
-treating `auth.json` map keys as switchable user identities, on copying a
-saved `auth.json` over a home a grok process is using, or on assuming
+`[verified-local]`, `[verified-source]`, or `[verified-docs]` claims. A write
+path may rest on pointing `$GROK_HOME` at a per-account directory that already
+contains that account's `auth.json`, because the vendor home crate is the
+single source of truth and returns a non-empty `$GROK_HOME` verbatim. It may
+not rest on treating `auth.json` map keys as switchable user identities, on
+copying a saved `auth.json` over a home a grok process is using, or on assuming
 `$GROK_AUTH_PATH` still follows `$GROK_HOME`.
 
 An in-place swap of `auth.json` is still a candidate only when no grok process
@@ -190,12 +194,12 @@ the live 0.2.93 binary remains `[unknown]`.
 
 `active_sessions.json` records open TUI sessions. `list_in` enumerates the
 recorded entries. `collect_crashed` returns entries whose PIDs are dead and
-drops them from the file `[verified-docs]`. A switch performed while a session
+drops them from the file `[verified-source]`. A switch performed while a session
 is registered against the target home should be refused.
 
 ### Lock protocol for `auth.json.lock`
 
-This is the vendor's own contract `[verified-docs]`. Implement against it.
+This is the vendor's own contract `[verified-source]`. Implement against it.
 Do not invent a simpler flock.
 
 - The lock file is `auth.json.lock` next to `auth.json`.
@@ -218,7 +222,7 @@ Do not invent a simpler flock.
 
 ### Write protocol for `auth.json`
 
-Vendor write path `[verified-docs]`:
+Vendor write path `[verified-source]`:
 
 - Unique temp name `auth.json.<pid>.<seq>.tmp` beside the target.
 - Write, flush, `sync_all`, then rename into place. On Windows the target is
@@ -249,16 +253,17 @@ untested on this host `[unknown]`.
 ## 8. Risks and constraints
 
 - **Background refresh races any in-place write.** A running CLI rewrites
-  `auth.json` on its own refresh schedule `[verified-docs]`. A snapshot taken
+  `auth.json` on its own refresh schedule `[verified-source]`. A snapshot taken
   while the CLI runs goes stale. Restoring it can revoke the token family
   (§5). Refuse a write while any process named `grok` is using that home,
   and while `auth.json.lock` is held or `active_sessions.json` lists a live
   PID.
 - **A running CLI adopts a swapped file on its next 401.** Recovery first
   re-reads `auth.json` under the lock and accepts a differing on-disk token
-  `[verified-docs]`. The user guide also states that changes to `auth.json`
-  are picked up on the next API call without a restart. That is not a
-  safe switch mechanism. It is how a restored stale snapshot gets spent.
+  `[verified-source]`. The user guide also states that changes to `auth.json`
+  are picked up on the next API call without a restart `[verified-docs]`. That
+  is not a safe switch mechanism. It is how a restored stale snapshot gets
+  spent.
 - **`config.toml` outranks `auth.json`.** A per-model `api_key` or `env_key`
   wins over the session token, which wins over `XAI_API_KEY`
   `[verified-docs]`. Switching homes or files does not change the identity
