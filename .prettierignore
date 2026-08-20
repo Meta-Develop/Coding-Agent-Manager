@@ -7,3 +7,5 @@ flake.lock
 *.png
 *.ico
 *.icns
+# Registry-synced local files are not covered by repository formatting.
+.agents/

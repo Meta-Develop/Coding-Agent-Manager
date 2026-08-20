@@ -163,7 +163,7 @@ fn rfc3339_from_epoch_millis(millis: i64) -> Option<String> {
 ///
 /// Token values, `subscriptionType`, and `rateLimitTier` are never copied
 /// onto the `Account`. `rateLimitTier` is quota-shaped and is not an expiry
-/// or a utilisation number; `quota()` stays empty (NFR-8).
+/// or a utilisation number (NFR-8).
 fn account_from_documents(
     provider_id: &str,
     credentials: &Map<String, Value>,
@@ -191,6 +191,11 @@ fn account_from_documents(
         masked_identity,
         auth_kind,
         is_active: true,
+        is_selected_for_launch: false,
+        // The on-disk identity lives in the tool's own home. This adapter
+        // stores nothing, so mutating operations have nothing to act on.
+        is_stored: false,
+        is_incomplete: false,
         expires_at,
     }
 }
@@ -210,6 +215,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             // `Supported` would overstate that (NFR-8).
             maturity: Maturity::Experimental,
             install_state: self.detect(),
+            capabilities: Vec::new(),
         }
     }
 
@@ -277,6 +283,53 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             &credentials,
             identity.as_ref(),
         )])
+    }
+
+    fn quota(&self) -> Result<Vec<crate::model::QuotaSnapshot>> {
+        // `rateLimitTier` is a tier, and cached utilization is not a
+        // dependable signal (`docs/research/claude-code.md` section 6).
+        Ok(Vec::new())
+    }
+
+    fn plan_label(&self) -> Result<Option<String>> {
+        let Some(home) = self.resolved_home() else {
+            return Ok(None);
+        };
+        let identity_path = home.join(".claude.json");
+        let Some(identity) = self.read_optional_object(&identity_path)? else {
+            return Ok(None);
+        };
+        let Some(oauth_account) = identity.get("oauthAccount") else {
+            return Ok(None);
+        };
+        if oauth_account.is_null() {
+            return Ok(None);
+        }
+        let Some(oauth_account) = oauth_account.as_object() else {
+            return Err(self.config_read(format!(
+                "{} oauthAccount is not an object",
+                identity_path.display()
+            )));
+        };
+        let plan_label = match oauth_account.get("billingType") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(label)) if !label.trim().is_empty() => {
+                Some(label.trim().to_string())
+            }
+            Some(Value::String(_)) => {
+                return Err(self.config_read(format!(
+                    "{} oauthAccount.billingType is empty",
+                    identity_path.display()
+                )));
+            }
+            Some(_) => {
+                return Err(self.config_read(format!(
+                    "{} oauthAccount.billingType is not a string",
+                    identity_path.display()
+                )));
+            }
+        };
+        Ok(plan_label)
     }
 
     fn activate_account(&self, _account_id: &str) -> Result<()> {
@@ -385,10 +438,11 @@ mod tests {
         let accounts = adapter.list_accounts().expect("list");
 
         let expected_path = Path::new(FIXTURE_ROOT).join("expected/accounts.json");
-        let expected: serde_json::Value = serde_json::from_str(
+        let mut expected: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(&expected_path).expect("expected/accounts.json"),
         )
         .expect("expected json");
+        expected[0]["isSelectedForLaunch"] = serde_json::Value::Bool(false);
         let got = serde_json::to_value(&accounts).expect("serialize");
         assert_eq!(got, expected);
 
@@ -610,6 +664,31 @@ mod tests {
             snapshots.is_empty(),
             "rateLimitTier must not be invented into a QuotaSnapshot: {snapshots:?}"
         );
+    }
+
+    #[test]
+    fn quota_reads_plan_only_from_non_credential_client_state() {
+        let home = tempfile::tempdir().expect("tempdir");
+        write_credentials(home.path(), "{not valid credential JSON");
+        write_identity(home.path(), r#"{"oauthAccount":{"billingType":"pro"}}"#);
+        let plan = ClaudeCodeAdapter::with_home(home.path())
+            .plan_label()
+            .expect("plan lookup must not read .credentials.json");
+        assert_eq!(plan.as_deref(), Some("pro"));
+    }
+
+    #[test]
+    fn quota_rejects_malformed_plan_state_without_echoing_it() {
+        let home = tempfile::tempdir().expect("tempdir");
+        write_identity(
+            home.path(),
+            r#"{"oauthAccount":{"billingType":{"value":"FAKE-secret"}}}"#,
+        );
+        let error = ClaudeCodeAdapter::with_home(home.path())
+            .plan_label()
+            .expect_err("malformed plan state must fail");
+        assert!(matches!(error, Error::ConfigRead { .. }));
+        assert_no_fake("quota ConfigRead", &format!("{error} {error:?}"));
     }
 
     #[test]

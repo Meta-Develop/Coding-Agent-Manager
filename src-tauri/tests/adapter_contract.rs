@@ -20,13 +20,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use coding_agent_manager_lib::error::Error;
-use coding_agent_manager_lib::model::{Account, Maturity};
+use coding_agent_manager_lib::model::{
+    Account, AuthKind, Maturity, ProviderCapability, StoredAccountMaterial, StoredAccountMetadata,
+    StoredAccountState,
+};
 use coding_agent_manager_lib::providers::claude_code::ClaudeCodeAdapter;
 use coding_agent_manager_lib::providers::codex_cli::CodexCliAdapter;
 use coding_agent_manager_lib::providers::cursor::CursorAdapter;
 use coding_agent_manager_lib::providers::gemini_cli::GeminiCliAdapter;
 use coding_agent_manager_lib::providers::grok_cli::GrokCliAdapter;
-use coding_agent_manager_lib::providers::{self, ProviderAdapter};
+use coding_agent_manager_lib::providers::{self, ActivationMechanism, ProviderAdapter};
 use tempfile::TempDir;
 
 use crate::common::{assert_no_fake, copy_tree, tree_digest, FAKE_PREFIX};
@@ -226,53 +229,16 @@ fn list_accounts_never_echoes_fixture_secret_material() {
     );
 }
 
-/// `activate_account` is the only mutating method (`docs/ARCHITECTURE.md`
-/// §4) and must take a restorable backup first (`NFR-4`).
+/// `activate_account` must not mutate the fixture home when the switch
+/// is refused or fails (`NFR-4`). The probe id is not a stored account,
+/// so every adapter either returns `NotImplemented` or refuses. Success
+/// would mean an unknown id was treated as a live switch.
 ///
-/// No adapter implements it yet. Switching mechanics are `[inferred]` or
-/// `[unknown]` in `docs/research/`, and no write path may depend on those
-/// markers (`docs/research/README.md`). What is true today: every adapter
-/// either implements the method or returns exactly `Error::NotImplemented`,
-/// and an unimplemented one writes nothing to the fixture home.
-///
-/// # NEXT WORKER — backup-ordering assertions (`docs/TESTING.md` §2, `NFR-4`)
-///
-/// When the first adapter returns anything other than
-/// `Error::NotImplemented` from `activate_account`, this test must gain
-/// the following assertions in the same change. Do not land the
-/// implementation with only the `NotImplemented` arm below still in
-/// force; the gap is how a write path ships without a restore check.
-///
-/// 1. **Backup before the first mutation.** Copy the adapter's fixture
-///    `home/` into a `TempDir` and inject it through `with_home`. Record
-///    `tree_digest` of that home. Call `activate_account` with an account
-///    id that `list_accounts` actually returned (a probe id would make
-///    the write path refuse and the check vacuous). After the call:
-///    - a restorable backup of every path in `config_paths()` must exist
-///      *before* any byte of the fixture home differs from the pre-call
-///      digest;
-///    - that backup must be visible to `BackupStore::list` and its
-///      `manifest.json` must already be on disk (the M1 suite in
-///      `m1_exit_criteria.rs` is the oracle for "the backup exists");
-///    - the backup root must itself be a `TempDir`. Adapters today have
-///      no injected backup root, so the implementation that first writes
-///      must accept one — otherwise the snapshot lands in the
-///      developer's real application-data directory, which this suite
-///      must never touch (`docs/TESTING.md` §4).
-///
-/// 2. **Forced mid-write failure leaves the fixture restorable.** After
-///    the backup exists, force a failure after the first managed write
-///    (the public API has no injection hook today; add one, or drive the
-///    same `BackupStore::snapshot` / `fsx::write_atomic` /
-///    `BackupStore::restore` sequence the adapter itself uses). Then
-///    `BackupStore::restore` must return the fixture home to a
-///    byte-identical `tree_digest`, including Unix permission bits and
-///    paths that did not exist before the switch. Reuse
-///    `common::tree_digest`; do not write a second oracle.
-///
-/// Do not implement either assertion against a guessed write path. Every
-/// claim about how a tool selects the active identity is still
-/// `[inferred]` or `[unknown]` in `docs/research/` as of this suite.
+/// Backup-before-the-first-write and restore-on-mid-write-failure are
+/// pinned in `codex_cli.rs` unit tests, which inject a backup root and
+/// a fault. This suite cannot: the trait has no backup-root or fault
+/// hook, and a snapshot must not land in the real data directory
+/// (`docs/TESTING.md` §4).
 #[test]
 fn activate_account_is_implemented_or_exactly_not_implemented() {
     for id in registry_ids() {
@@ -280,29 +246,215 @@ fn activate_account_is_implemented_or_exactly_not_implemented() {
         let adapter = adapter_for_home(id, home.path());
         let before = tree_digest(home.path());
 
-        match adapter.activate_account("contract-suite-probe") {
-            Err(Error::NotImplemented(_)) => {
-                let after = tree_digest(home.path());
-                assert_eq!(
-                    before,
-                    after,
-                    "`{id}` broke activate_account: returned NotImplemented \
-                     but mutated the home:\n{}",
-                    before.diff(&after)
+        let result = adapter.activate_account("contract-suite-probe");
+        let after = tree_digest(home.path());
+        assert_eq!(
+            before,
+            after,
+            "`{id}` broke activate_account: a refused or failed switch \
+             must leave the home byte-identical (NFR-4):\n{}",
+            before.diff(&after)
+        );
+        assert!(
+            result.is_err(),
+            "`{id}` broke activate_account: probe id `contract-suite-probe` \
+             is not a stored account; success would mean an unknown id \
+             was treated as a live switch (got {result:?})"
+        );
+    }
+}
+
+/// `NFR-8`: advertised capabilities must match method implementation.
+///
+/// An adapter that lists a capability must not return `NotImplemented`
+/// from the corresponding contract path, and one that omits it must. A
+/// configuration switch uses `activate_account`; an environment switch uses
+/// `launch_spec` after core persists a complete selected record. The probe
+/// id is not a safe path component, so a real implementation refuses
+/// before creating a directory, writing the live home, or spawning the
+/// vendor CLI. The suite therefore never starts `codex`, never reaches
+/// the keychain, and never writes into the real data directory or the
+/// real home (`docs/TESTING.md` §4).
+#[test]
+fn advertised_capabilities_match_method_implementation() {
+    const PROBE: &str = "../etc";
+    let expected = [
+        ProviderCapability::AddAccount,
+        ProviderCapability::SwitchAccount,
+        ProviderCapability::DeleteAccount,
+        ProviderCapability::LaunchTool,
+    ];
+
+    for id in registry_ids() {
+        let home = staged_home(id);
+        let adapter = adapter_for_home(id, home.path());
+        let advertised = adapter.descriptor().capabilities;
+        let before = tree_digest(home.path());
+
+        for capability in expected {
+            let result = match capability {
+                ProviderCapability::AddAccount => match adapter.managed_account_plan() {
+                    Some(plan) => adapter
+                        .provision_stored_account(&contract_probe_metadata(id, PROBE, plan))
+                        .map(|_| ()),
+                    None => adapter.add_account(PROBE),
+                },
+                ProviderCapability::SwitchAccount => match adapter.activation_mechanism() {
+                    ActivationMechanism::ToolConfiguration => adapter.activate_account(PROBE),
+                    ActivationMechanism::LaunchEnvironment => adapter
+                        .launch_spec(&contract_probe_metadata_for(adapter.as_ref(), PROBE))
+                        .map(|_| ()),
+                },
+                ProviderCapability::DeleteAccount => match adapter.managed_account_plan() {
+                    Some(plan) => adapter
+                        .validate_stored_account_delete(&contract_probe_metadata(id, PROBE, plan)),
+                    None => adapter.delete_account(PROBE),
+                },
+                ProviderCapability::LaunchTool => adapter
+                    .launch_spec(&contract_probe_metadata_for(adapter.as_ref(), PROBE))
+                    .map(|_| ()),
+            };
+            let after = tree_digest(home.path());
+            assert_eq!(
+                before,
+                after,
+                "`{id}` broke {capability:?}: a path-escape id must not mutate \
+                 the home:\n{}",
+                before.diff(&after)
+            );
+
+            let not_implemented = matches!(result, Err(Error::NotImplemented(_)));
+            if advertised.contains(&capability) {
+                assert!(
+                    !not_implemented,
+                    "`{id}` advertises {capability:?}; NotImplemented would \
+                     be a lie (got {result:?})"
+                );
+            } else {
+                assert!(
+                    not_implemented,
+                    "`{id}` does not advertise {capability:?}; returning \
+                     {result:?} would overstate what the adapter can do (NFR-8)"
                 );
             }
-            other => {
-                // Implemented. The backup-ordering assertions in the
-                // NEXT WORKER comment above are not in force yet; name
-                // the adapter so the gap cannot be mistaken for a pass
-                // of NFR-4.
-                let _ = other;
-                eprintln!(
-                    "adapter_contract `{id}` implements activate_account; \
-                     NFR-4 backup-before-mutation and mid-write restore \
-                     are unproven (see NEXT WORKER comment)"
-                );
+        }
+    }
+}
+
+fn contract_probe_metadata_for(
+    adapter: &dyn ProviderAdapter,
+    account_id: &str,
+) -> StoredAccountMetadata {
+    match adapter.managed_account_plan() {
+        Some(plan) => contract_probe_metadata(adapter.id(), account_id, plan),
+        None => StoredAccountMetadata {
+            id: account_id.to_string(),
+            provider_id: adapter.id().to_string(),
+            label: "contract probe".to_string(),
+            auth_kind: AuthKind::Unknown,
+            state: StoredAccountState::Complete,
+            material: StoredAccountMaterial::VendorHome,
+            is_selected: true,
+        },
+    }
+}
+
+fn contract_probe_metadata(
+    provider_id: &str,
+    account_id: &str,
+    plan: coding_agent_manager_lib::providers::ManagedAccountPlan,
+) -> StoredAccountMetadata {
+    StoredAccountMetadata {
+        id: account_id.to_string(),
+        provider_id: provider_id.to_string(),
+        label: "contract probe".to_string(),
+        auth_kind: plan.auth_kind,
+        state: StoredAccountState::Complete,
+        material: plan.material,
+        is_selected: true,
+    }
+}
+
+/// Environment selection is useful only through the app-owned launcher, and
+/// launching must use an explicitly selected complete account. Advertising
+/// either half alone would expose a dead-end UI path (NFR-8).
+#[test]
+fn launch_environment_pairs_switch_and_launch_capabilities() {
+    for adapter in providers::registry() {
+        if adapter.activation_mechanism() != ActivationMechanism::LaunchEnvironment {
+            continue;
+        }
+        let capabilities = adapter.descriptor().capabilities;
+        assert!(
+            capabilities.contains(&ProviderCapability::SwitchAccount),
+            "`{}` uses launch-environment activation without switch-account",
+            adapter.id()
+        );
+        assert!(
+            capabilities.contains(&ProviderCapability::LaunchTool),
+            "`{}` uses launch-environment activation without launch-tool",
+            adapter.id()
+        );
+    }
+}
+
+/// `NFR-8`: `is_stored` must match whether `delete_account` can act on
+/// the listed row.
+///
+/// Capability is per provider; actionability is per row. An adapter that
+/// reports `is_stored: true` for a row whose `delete_account` returns
+/// `UnknownAccount` is lying the same way an advertised `NotImplemented`
+/// method is. Listed ids are already path-safe. `delete_account` on an
+/// unstored row returns `UnknownAccount` (or `NotImplemented`) without
+/// creating a directory, writing the live home, or spawning the vendor
+/// CLI. A stored row is deleted only under the injected TempDir:
+/// `with_home` isolates data under `{home}/.coding-agent-manager`. The
+/// suite never starts `codex`, never reaches the keychain, and never
+/// writes the real data directory or the real home (`docs/TESTING.md` §4).
+#[test]
+fn listed_is_stored_matches_delete_account() {
+    for id in registry_ids() {
+        let home = staged_home(id);
+        let adapter = adapter_for_home(id, home.path());
+        let before = tree_digest(home.path());
+        let accounts = match adapter.list_accounts() {
+            Ok(accounts) => accounts,
+            Err(Error::NotImplemented(_)) => continue,
+            Err(error) => {
+                panic!("`{id}` broke is_stored: list_accounts failed on its fixture: {error:?}")
             }
+        };
+
+        for account in accounts.iter().filter(|account| !account.is_stored) {
+            let result = adapter.delete_account(&account.id);
+            let after = tree_digest(home.path());
+            assert_eq!(
+                before,
+                after,
+                "`{id}` broke is_stored: deleting unstored `{}` mutated \
+                 the home:\n{}",
+                account.id,
+                before.diff(&after)
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::UnknownAccount(_)) | Err(Error::NotImplemented(_))
+                ),
+                "`{id}` listed `{}` as not stored; delete_account returned \
+                 {result:?} instead of UnknownAccount or NotImplemented (NFR-8)",
+                account.id
+            );
+        }
+
+        for account in accounts.iter().filter(|account| account.is_stored) {
+            let result = adapter.delete_account(&account.id);
+            assert!(
+                !matches!(result, Err(Error::UnknownAccount(_))),
+                "`{id}` listed `{}` as stored; UnknownAccount would be a lie \
+                 (got {result:?})",
+                account.id
+            );
         }
     }
 }

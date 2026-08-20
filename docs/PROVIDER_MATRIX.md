@@ -7,49 +7,56 @@ Confidence markers follow [`research/README.md`](research/README.md).
 Observations were made on Linux (NixOS) in August 2026 against the tool versions
 listed in each research note.
 
-| Provider        | Auth kinds                    | Credential location                                                                | Credential store                                       | Switch without re-auth                                                                         | Quota signal                                                                                       | Base-URL override                                 | Adapter difficulty                                                              |
-| --------------- | ----------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------- |
-| **Codex CLI**   | OAuth (ChatGPT plan), API key | `~/.codex/auth.json` `[verified-local]`                                            | Plain JSON file `[verified-local]`                     | Likely — single self-contained file, plus `CODEX_HOME` relocation `[inferred]`                 | Not observed locally `[unknown]`                                                                   | Yes, OpenAI-compatible base URL `[verified-docs]` | **Low** — one document to swap, and a second env-var strategy as backup         |
-| **Grok CLI**    | OAuth (OIDC), API key         | `~/.grok/auth.json` `[verified-local]`                                             | Plain JSON file, keyed per identity `[verified-local]` | Likely — the file already holds multiple identities `[inferred]`                               | `models_cache.json` exists; contents unconfirmed `[unknown]`                                       | Unconfirmed `[unknown]`                           | **Low–medium** — multi-identity by design, but advisory locks must be respected |
-| **Claude Code** | OAuth, API key                | `~/.claude/.credentials.json` `[verified-local]`                                   | Plain JSON file `[verified-local]`                     | Likely, but two files must move together `[inferred]`                                          | `rateLimitTier` present in credentials; no usage counter observed `[verified-local]` / `[unknown]` | Yes, `ANTHROPIC_BASE_URL` `[verified-docs]`       | **Medium** — identity is split between `.credentials.json` and `~/.claude.json` |
-| **Gemini CLI**  | OAuth, API key                | Not observed — installation was not signed in `[unknown]`                          | Unknown `[unknown]`                                    | Yes for API-key accounts via `GEMINI_API_KEY` `[verified-docs]`; unknown for OAuth `[unknown]` | Unknown `[unknown]`                                                                                | Yes, API-key mode `[verified-docs]`               | **Medium** — needs a signed-in host to establish the OAuth path                 |
-| **Cursor**      | Unknown `[unknown]`           | Not found in `~/.cursor/` or `~/.config/cursor/cli-config.json` `[verified-local]` | Suspected OS keyring or Electron storage `[inferred]`  | Unknown `[unknown]`                                                                            | Unknown `[unknown]`                                                                                | Unknown `[unknown]`                               | **High** — nothing about its credential handling is established yet             |
+| Provider        | Descriptor auth kinds | Maturity     | Capabilities                                                     | Implemented account behavior                                                                                                                                                                                                                                                                         | Quota signal                                                                                       |
+| --------------- | --------------------- | ------------ | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| **Codex CLI**   | OAuth, API key        | Experimental | `add-account`, `switch-account`, `delete-account`                | Adds a manager-created stored account populated by vendor login, replaces live `auth.json` behind a restorable backup, and forgets stored copies. Local `login status` follows the replaced file `[verified-local]`; vendor acceptance of a copied credential is untested `[unknown]`.               | Empty snapshot vector. No verified numeric signal.                                                 |
+| **Grok CLI**    | OAuth, API key        | Experimental | `add-account`, `switch-account`, `delete-account`, `launch-tool` | Creates and retains a managed vendor home. Selection affects only an app-owned child by setting `GROK_HOME` and removing inherited `GROK_AUTH_PATH`; forgetting metadata does not delete the home. Those vendor environment semantics are `[verified-source]`; the local binary binding is unproven. | Empty snapshot vector. No counter observed `[verified-local]`; `models_cache.json` is `[unknown]`. |
+| **Claude Code** | OAuth, API key        | Experimental | None                                                             | Read-only listing. The paired identity fields are `[verified-local]` on 2.1.212, but the crash-safe two-file switch is unimplemented.                                                                                                                                                                | Empty snapshot vector. `billingType` may supply a plan label, not utilization.                     |
+| **Gemini CLI**  | OAuth, API key        | Experimental | `add-account`, `switch-account`, `delete-account`, `launch-tool` | Managed API-key accounts use `CredentialStore`; selection resolves the key only when spawning an app-owned child. The tested add/select/launch/delete flow leaves the configuration tree unchanged. OAuth listing and switching are unimplemented.                                                   | Empty snapshot vector. Published limits do not establish current utilization.                      |
+| **Cursor**      | Unknown, API key      | Experimental | None                                                             | Read-only Cursor CLI listing through `cursor-agent status`. Browser authentication and API-key input are documented, but credential storage and switching remain unknown.                                                                                                                            | Empty snapshot vector. No verified numeric signal.                                                 |
+
+`ProviderDescriptor.capabilities` uses the wire values `add-account`,
+`switch-account`, `delete-account`, and `launch-tool`. “Switch” for Grok and
+Gemini means selection for an app-owned launch; it does not change the account
+used by a tool started from another shell.
+
+The established credential locations and relay-relevant overrides remain:
+
+| Provider        | Credential location or selector                                                                                                                                                                         | Base-URL override                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| **Codex CLI**   | `~/.codex/auth.json` `[verified-local]`; managed copies under the application data directory                                                                                                            | OpenAI-compatible base URL `[verified-docs]`                               |
+| **Grok CLI**    | Default `~/.grok/auth.json` `[verified-local]`; selected managed home via `GROK_HOME` `[verified-source]`                                                                                               | `GROK_CLI_CHAT_PROXY_BASE_URL` `[verified-docs]`; plan session `[unknown]` |
+| **Claude Code** | `~/.claude/.credentials.json` and `~/.claude.json` `[verified-local]`                                                                                                                                   | `ANTHROPIC_BASE_URL` `[verified-docs]`                                     |
+| **Gemini CLI**  | Managed API keys in `CredentialStore`; `~/.gemini/oauth_creds.json`, `~/.gemini/google_accounts.json`, and `~/.gemini/settings.json` are `[verified-source]`, but were not observed on a signed-in host | API-key mode `[verified-docs]`                                             |
+| **Cursor**      | Not found in `~/.cursor/` or `~/.config/cursor/cli-config.json` `[verified-local]`                                                                                                                      | `[unknown]`                                                                |
 
 ## What this implies for sequencing
 
-Codex CLI and Grok CLI now list accounts from their on-disk `auth.json` files.
-Claude Code lists the on-disk identity by reading `.credentials.json` and
-`~/.claude.json`. Gemini CLI lists an account when `GEMINI_API_KEY` is set. It
-does not list OAuth accounts: the adapter still reads only `GEMINI_API_KEY`,
-not the OAuth files vendor source now names. No adapter implements switching.
-Codex switching strategies are `[inferred]`, and how
-Grok CLI selects the active identity is `[unknown]`. The remaining order is
-unchanged.
+The remaining implementation and verification order is now narrower:
 
-1. **Codex CLI first.** It is the only provider whose entire credential state is
-   one readable document. Listing that document is in place. The switch
-   verification path is still the cheapest remaining end-to-end proof.
-2. **Grok CLI second.** Its multi-identity file already exercises the "several
-   accounts coexist" case that the domain model assumes. Switching still needs
-   the advisory-lock handling that other adapters will also need.
-3. **Claude Code third.** Listing the two-file identity is in place. A switch
-   must still move both files together, which is the first case where
-   atomicity across more than one file actually matters.
-4. **Gemini CLI fourth.** Listing the API-key path is in place. This adapter
-   still reads only `GEMINI_API_KEY` and does not list OAuth accounts. An
-   OAuth switch remains unimplementable until a signed-in host observation
-   closes the remaining `[unknown]` write-path questions.
-5. **Cursor last**, and read-only until its credential handling is established.
-   Writing a switch for a store you have not found is how you lock a user out.
+1. **Codex CLI first.** It is the only provider whose entire credential
+   state is one readable document. Add, list, local switch, and delete are
+   in place. A switch verified by the vendor accepting the copied
+   credential is still the cheapest remaining end-to-end proof.
+2. **Grok CLI second.** Managed-home launch selection is implemented without
+   mutating the default home. A real vendor/account run remains before the M2
+   exit criterion can close.
+3. **Claude Code third.** Listing and write-path research are in place. A switch
+   must meet the paired-backup, durable-recovery, fail-closed lock/process,
+   surgical-preservation, failure-injection, and full `FR-2` safety bar.
+4. **Gemini CLI fourth.** The API-key path meets its M3 exit criterion. OAuth
+   listing and switching remain unimplemented.
+5. **Cursor last.** Read-only CLI listing is implemented. Mutation remains
+   blocked until the credential store and write path are `[verified-local]`.
 
 This ordering is reflected in [`ROADMAP.md`](ROADMAP.md).
 
 ## Open questions blocking implementation
 
-| Question                                                                                            | Blocks                               |
-| --------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| Where does `cursor-agent login` persist its session?                                                | The entire Cursor adapter            |
-| Where does Gemini CLI store OAuth credentials after sign-in?                                        | Gemini OAuth accounts                |
-| Does any of the five expose a machine-readable quota or usage endpoint?                             | `FR-5`, and therefore `FR-7`         |
-| Do Claude Code and Codex CLI honour a base-URL override in plan-auth mode, or only in API-key mode? | `FR-6` usefulness for those tools    |
-| Does swapping `~/.codex/auth.json` invalidate a session server-side?                                | The core switching premise for Codex |
+| Question                                                                                                                                  | Blocks                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Where does `cursor-agent login` persist its session?                                                                                      | Cursor add, switch, and delete                                      |
+| Is replacing Gemini `oauth_creds.json`, with coordinated `google_accounts.json` and settings state, sufficient for a next-process switch? | Gemini OAuth switching                                              |
+| Does any provider expose a verified machine-readable current-usage signal?                                                                | Provider-backed numeric rows and production `max_utilization` gates |
+| Do Claude Code and Codex CLI honour a base-URL override in plan-auth mode, or only in API-key mode?                                       | Real-agent `FR-6` verification for those tools                      |
+| Does swapping `~/.codex/auth.json` invalidate a session server-side?                                                                      | The M2 real-vendor exit criterion for Codex                         |
