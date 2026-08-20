@@ -3,6 +3,7 @@ import type {
   ProviderAccountList,
   ProviderDescriptor,
   QuotaSnapshot,
+  RelayStatus,
 } from '@/types'
 
 /**
@@ -47,4 +48,17 @@ export function deleteAccount(
 
 export function listQuota(): Promise<QuotaSnapshot[]> {
   return invoke<QuotaSnapshot[]>('list_quota')
+}
+
+export function relayStatus(): Promise<RelayStatus> {
+  return invoke<RelayStatus>('relay_status')
+}
+
+/** Starts only the Rust core's safe default loopback configuration. */
+export function startRelay(): Promise<RelayStatus> {
+  return invoke<RelayStatus>('start_relay')
+}
+
+export function stopRelay(): Promise<RelayStatus> {
+  return invoke<RelayStatus>('stop_relay')
 }

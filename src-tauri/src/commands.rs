@@ -7,11 +7,12 @@
 use crate::error::{Error, Result};
 use crate::model::{
     Account, AccountListError, AccountListErrorKind, AccountListOutcome, ProviderAccountList,
-    ProviderDescriptor, QuotaSnapshot,
+    ProviderDescriptor, QuotaSnapshot, RelayStatus,
 };
 use crate::providers;
 use crate::providers::codex_cli::CodexCliAdapter;
 use crate::providers::ProviderAdapter;
+use crate::relay;
 
 /// Providers whose `list_accounts` inspects only an API key, not OAuth.
 ///
@@ -194,6 +195,26 @@ pub fn list_quota() -> Result<Vec<QuotaSnapshot>> {
         }
     }
     Ok(snapshots)
+}
+
+/// Start the relay with its safe default loopback configuration.
+///
+/// No listener configuration or authentication token crosses the IPC boundary.
+#[tauri::command]
+pub async fn start_relay() -> Result<RelayStatus> {
+    relay::start_relay().await
+}
+
+/// Stop the relay listener and return its resulting state.
+#[tauri::command]
+pub async fn stop_relay() -> Result<RelayStatus> {
+    relay::stop_relay().await
+}
+
+/// Return public listener state. The relay core owns the configured prefixes.
+#[tauri::command]
+pub async fn relay_status() -> Result<RelayStatus> {
+    relay::relay_status().await
 }
 
 #[cfg(test)]
