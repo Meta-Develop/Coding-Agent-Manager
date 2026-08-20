@@ -62,6 +62,17 @@
             echo "Coding Agent Manager dev shell — node $(node --version), cargo $(cargo --version | cut -d' ' -f2)"
           '';
         };
+
+        packages = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux rec {
+          coding-agent-manager = pkgs.callPackage ./nix/package.nix {
+            inherit linuxLibs;
+            iconDir = ./src-tauri/icons;
+            # Content hash of the Linux release binary from `npm run tauri:build`.
+            # Refresh with `nix hash file --sri` after rebuilding that binary.
+            unwrappedSha256 = "sha256-DpxRm0Vs+RebdguDUyMRS0gccxsOIWVqFpeaG+c8v5M=";
+          };
+          default = coding-agent-manager;
+        };
       }
     );
 }

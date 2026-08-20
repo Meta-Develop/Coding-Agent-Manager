@@ -97,6 +97,12 @@ npm install
 npm run tauri:build
 ```
 
+There are no official GitHub release installers yet. On a Nix host, wrap that
+Linux binary with `nix build .#coding-agent-manager` and install it with
+`nix profile install .#coding-agent-manager`, or add the same flake output to
+Home Manager. The hash-and-wrap steps are in
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+
 Full prerequisites for every platform are in
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
