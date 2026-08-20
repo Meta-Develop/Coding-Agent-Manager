@@ -1216,6 +1216,12 @@ impl ProviderAdapter for GrokCliAdapter {
         }
     }
 
+    fn quota(&self) -> Result<Vec<crate::model::QuotaSnapshot>> {
+        // No quota counter was observed [verified-local]; models_cache.json
+        // remains [unknown] (`docs/research/grok-cli.md` section 6).
+        Ok(Vec::new())
+    }
+
     fn activate_account(&self, _account_id: &str) -> Result<()> {
         // Core owns environment selection; there is intentionally no in-file
         // activation path for this adapter.

@@ -271,6 +271,12 @@ impl ProviderAdapter for CursorAdapter {
         }
     }
 
+    fn quota(&self) -> Result<Vec<crate::model::QuotaSnapshot>> {
+        // Cursor's local quota signal is [unknown]; the attribution database
+        // must not be treated as quota (`docs/research/cursor.md` section 6).
+        Ok(Vec::new())
+    }
+
     fn activate_account(&self, _account_id: &str) -> Result<()> {
         Err(Error::NotImplemented("cursor::activate_account"))
     }

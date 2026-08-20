@@ -93,11 +93,35 @@ export interface LaunchedProcess {
 export interface QuotaSnapshot {
   accountId: string
   model: string | null
-  /** 0..1, or null when the provider exposes no usable signal. */
-  utilization: number | null
+  /** Fraction of the published window consumed, 0..1. */
+  utilization: number
+  /** Provider-published rate-limit window, when available. */
+  windowLabel: string | null
   resetsAt: string | null
   capturedAt: string
-  source: 'local-file' | 'api' | 'header' | 'unknown'
+  source: 'local-file' | 'api' | 'header'
+}
+
+export type QuotaListOutcome =
+  | { kind: 'available' }
+  | { kind: 'no-signal' }
+  | { kind: 'failed'; error: QuotaListError }
+
+export type QuotaListErrorKind = 'config-read' | 'invalid-snapshot' | 'other'
+
+/** Secret-free quota collection error surfaced to the dashboard. */
+export interface QuotaListError {
+  kind: QuotaListErrorKind
+  path: string | null
+  message: string
+}
+
+/** One honest quota collection outcome for every registered provider. */
+export interface ProviderQuotaList {
+  providerId: ProviderId
+  planLabel: string | null
+  snapshots: QuotaSnapshot[]
+  outcome: QuotaListOutcome
 }
 
 /** Secret-free state for the local relay listener. */

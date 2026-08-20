@@ -1083,6 +1083,12 @@ impl ProviderAdapter for CodexCliAdapter {
             }
         }
     }
+
+    fn quota(&self) -> Result<Vec<crate::model::QuotaSnapshot>> {
+        // No local quota file was observed [verified-local], and response
+        // headers are only [inferred] (`docs/research/codex-cli.md` section 6).
+        Ok(Vec::new())
+    }
 }
 
 /// After a failed `remove_dir_all`, name a path that is still there so
