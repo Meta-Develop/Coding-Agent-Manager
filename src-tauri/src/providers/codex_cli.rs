@@ -779,6 +779,7 @@ fn account_from_auth(
         masked_identity,
         auth_kind,
         is_active,
+        is_selected_for_launch: false,
         is_stored,
         is_incomplete: false,
         // `last_refresh` is a refresh timestamp, not an expiry [verified-local].
@@ -799,6 +800,7 @@ fn incomplete_account(provider_id: &str, account_id: &str) -> Account {
         masked_identity: None,
         auth_kind: AuthKind::Unknown,
         is_active: false,
+        is_selected_for_launch: false,
         is_stored: true,
         is_incomplete: true,
         expires_at: None,
