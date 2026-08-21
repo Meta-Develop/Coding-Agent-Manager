@@ -11,6 +11,7 @@ import AccountActions, {
   type PendingKind,
 } from '@/components/AccountActions'
 import AddAccountForm from '@/components/AddAccountForm'
+import InitialMark from '@/components/InitialMark'
 import NotImplemented from '@/components/NotImplemented'
 import PageHeader from '@/components/PageHeader'
 import {
@@ -109,7 +110,7 @@ export default function Accounts() {
         </p>
       )}
       {error !== null && (
-        <p className="mb-4 rounded-md border border-border-subtle p-3 text-sm">
+        <p className="notice notice-danger mb-4">
           Failed to load accounts: {error}
         </p>
       )}
@@ -191,13 +192,18 @@ function ProviderAccounts({
   const canDelete = hasCapability(provider, 'delete-account')
 
   return (
-    <section aria-labelledby={headingId}>
-      <h2 id={headingId} className="text-base font-semibold">
-        {provider.displayName}
-      </h2>
-      <p className="mt-1 text-xs text-ink-muted">
-        {provider.vendor} · {provider.maturity}
-      </p>
+    <section aria-labelledby={headingId} className="panel p-5">
+      <div className="flex items-start gap-3">
+        <InitialMark name={provider.displayName} />
+        <div>
+          <h2 id={headingId} className="text-base font-semibold tracking-tight">
+            {provider.displayName}
+          </h2>
+          <p className="mt-1 text-xs text-ink-muted">
+            {provider.vendor} · {provider.maturity}
+          </p>
+        </div>
+      </div>
       {listingBody({
         headingId,
         listing,
@@ -329,7 +335,7 @@ function listingBody({
       )
     case 'failed':
       return (
-        <p className="mt-3 rounded-md border border-border-subtle p-3 text-sm">
+        <p className="notice notice-danger mt-3">
           Looking failed: {listing.outcome.error.message}
         </p>
       )
@@ -355,7 +361,7 @@ function DamagedLiveFileNote({
   path: string | null
 }) {
   return (
-    <div className="mt-3 rounded-md border border-border-subtle p-3 text-sm">
+    <div className="notice notice-warn mt-3">
       <p>
         {provider.displayName}&apos;s own login file is damaged, so this
         application cannot tell which account the tool would use. Switching a
@@ -369,8 +375,8 @@ function DamagedLiveFileNote({
 
 function LimitationNote({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mt-3 rounded-lg border border-dashed border-border-subtle p-4">
-      <p className="text-sm text-ink-muted">{children}</p>
+    <div className="notice notice-empty mt-3">
+      <p className="text-sm">{children}</p>
     </div>
   )
 }
@@ -423,7 +429,7 @@ function AccountTable({
           Active account is not known for this provider.
         </p>
       )}
-      <div className="mt-3 w-0 min-w-full overflow-x-auto">
+      <div className="table-frame mt-3 w-0 min-w-full overflow-x-auto">
         <table
           className="accounts-table text-left text-sm"
           aria-labelledby={headingId}
@@ -565,6 +571,7 @@ function AccountTable({
                       >
                         <Confirmation
                           id={confirmId}
+                          confirmDanger={pendingKind === 'delete'}
                           label={
                             pendingKind === 'switch'
                               ? canLaunch
@@ -710,7 +717,7 @@ function statusCell(account: Account, activeKnown: boolean): ReactNode {
   if (account.isIncomplete) {
     const detail = 'Incomplete — sign-in never finished'
     return (
-      <span className="text-ink-muted" title={detail}>
+      <span className="chip chip-warn" title={detail}>
         Incomplete
       </span>
     )
@@ -718,16 +725,12 @@ function statusCell(account: Account, activeKnown: boolean): ReactNode {
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
       {account.isSelectedForLaunch && (
-        <span className="inline-flex rounded-full border border-border-subtle bg-surface px-2 py-0.5 text-xs font-semibold text-ink">
-          Selected for app launch
-        </span>
+        <span className="chip chip-accent">Selected for app launch</span>
       )}
       {!activeKnown ? (
         <span className="text-ink-muted">Not known</span>
       ) : account.isActive ? (
-        <span className="inline-flex rounded-full border border-border-subtle bg-surface px-2 py-0.5 text-xs font-semibold text-ink">
-          Active
-        </span>
+        <span className="chip">Active</span>
       ) : (
         <span className="text-ink-muted">—</span>
       )}

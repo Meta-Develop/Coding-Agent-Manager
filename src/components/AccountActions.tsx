@@ -1,12 +1,9 @@
 import { useId, type KeyboardEvent, type ReactNode } from 'react'
 import type { Account } from '@/types'
 
-const controlFocus =
-  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
-
-const buttonClass = `shrink-0 whitespace-nowrap rounded-md border border-border-subtle px-3 py-1.5 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
-
-const confirmClass = `whitespace-nowrap rounded-md border border-accent bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
+const quietButton = 'btn shrink-0'
+const primaryButton = 'btn btn-primary shrink-0'
+const dangerButton = 'btn btn-danger shrink-0'
 
 export type PendingKind = 'switch' | 'delete'
 
@@ -49,7 +46,7 @@ export default function AccountActions({
         <button
           type="button"
           disabled={disabled}
-          className={buttonClass}
+          className={quietButton}
           onClick={() => onRequest('switch')}
         >
           {usesLaunchSelection
@@ -61,7 +58,7 @@ export default function AccountActions({
         <button
           type="button"
           disabled={disabled}
-          className={buttonClass}
+          className={primaryButton}
           onClick={onLaunch}
         >
           Launch {name}
@@ -71,7 +68,7 @@ export default function AccountActions({
         <button
           type="button"
           disabled={disabled}
-          className={buttonClass}
+          className={dangerButton}
           onClick={() => onRequest('delete')}
         >
           {forgetsMetadataOnly ? `Forget ${name}` : `Delete ${name}`}
@@ -94,6 +91,7 @@ export function Confirmation({
   disabled,
   onCancel,
   onConfirm,
+  confirmDanger = false,
   children,
 }: {
   id?: string
@@ -103,6 +101,7 @@ export function Confirmation({
   disabled: boolean
   onCancel: () => void
   onConfirm: () => void
+  confirmDanger?: boolean
   children: ReactNode
 }) {
   const textId = useId()
@@ -130,7 +129,7 @@ export function Confirmation({
           type="button"
           autoFocus
           disabled={disabled}
-          className={confirmClass}
+          className={confirmDanger ? dangerButton : primaryButton}
           aria-label={confirmLabel}
           aria-describedby={textId}
           onClick={onConfirm}
@@ -139,7 +138,7 @@ export function Confirmation({
         </button>
         <button
           type="button"
-          className={buttonClass}
+          className={quietButton}
           aria-label={cancelLabel}
           onClick={onCancel}
         >
