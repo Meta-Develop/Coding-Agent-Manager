@@ -181,7 +181,7 @@ export default function Dashboard() {
             </p>
           </div>
           <div
-            className="flex rounded-md border border-border-subtle bg-surface p-1 shadow-control"
+            className="flex rounded-md border border-border-subtle bg-surface p-1"
             role="group"
             aria-label="Quota view"
           >
@@ -248,7 +248,7 @@ function ViewButton({
       type="button"
       className={`rounded px-3 py-1.5 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
         selected
-          ? 'bg-surface-raised font-medium text-ink shadow-control ring-1 ring-accent'
+          ? 'bg-surface-raised font-medium text-ink ring-1 ring-accent'
           : 'text-ink-muted hover:text-ink'
       }`}
       aria-pressed={selected}
@@ -276,7 +276,8 @@ function ProviderQuota({
 
   return (
     <article
-      className={`panel h-full p-4 ${
+      data-provider={provider.id}
+      className={`panel provider-block h-full p-4 ${
         view === 'list'
           ? 'md:grid md:grid-cols-[minmax(12rem,1fr)_2fr] md:gap-6'
           : ''
@@ -286,9 +287,12 @@ function ProviderQuota({
       <header className="flex items-start gap-3">
         <InitialMark name={provider.displayName} />
         <div>
-          <h3 className="font-semibold tracking-tight">
-            {provider.displayName}
-          </h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="font-semibold tracking-tight">
+              {provider.displayName}
+            </h3>
+            <span className="provider-chip">{provider.vendor}</span>
+          </div>
           <dl className="mt-2 space-y-1 text-sm text-ink-muted">
             <div className="flex gap-1">
               <dt>Adapter maturity:</dt>
@@ -351,7 +355,7 @@ function QuotaOutcome({
       {result.snapshots.map((snapshot, index) => (
         <li
           key={`${snapshot.accountId}-${snapshot.model ?? 'all'}-${snapshot.capturedAt}-${index}`}
-          className="rounded-md border border-border-subtle bg-surface p-3 shadow-control"
+          className="rounded-md border border-border-subtle bg-surface p-3"
         >
           <QuotaSnapshotDetails snapshot={snapshot} />
         </li>

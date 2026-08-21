@@ -1,14 +1,13 @@
-import { useId, useState, type FormEvent } from 'react'
+import { useId, useState, type FormEvent, type ReactNode } from 'react'
 import type { ProviderDescriptor } from '@/types'
 
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
 const ACCOUNT_ID_MAX_LENGTH = 128
 
 /**
- * Adds a stored account for one adapter. The name is the account id, so the
- * allowed characters are on screen before submit. Provider-specific copy
- * describes the native credential ingress without ever accepting a secret
- * in this webview.
+ * Adds a stored account for one adapter. The nickname is the account id.
+ * Codex and Grok start vendor sign-in; Gemini imports GEMINI_API_KEY from
+ * the native parent process. This webview never accepts a secret.
  */
 export default function AddAccountForm({
   provider,
@@ -26,6 +25,7 @@ export default function AddAccountForm({
   const errorId = `${id}-error`
   const [name, setName] = useState('')
   const [validation, setValidation] = useState<string | null>(null)
+  const flow = addFlow(provider)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -52,15 +52,16 @@ export default function AddAccountForm({
 
   return (
     <form
-      className="panel mt-4 p-4"
+      className="mt-5"
       onSubmit={(event) => {
         void handleSubmit(event)
       }}
     >
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="min-w-[12rem] flex-1">
-          <label htmlFor={nameId} className="block text-sm font-medium">
-            Account name
+      <h3 className="text-sm font-semibold tracking-tight">{flow.heading}</h3>
+      <ol className="mt-3 list-decimal space-y-4 pl-5 text-sm">
+        <li>
+          <label htmlFor={nameId} className="block font-medium">
+            Nickname
           </label>
           <input
             id={nameId}
@@ -79,24 +80,31 @@ export default function AddAccountForm({
                 setValidation(null)
               }
             }}
-            className="field mt-1"
+            className="field mt-1 max-w-md"
           />
-        </div>
-        <button type="submit" disabled={disabled} className="btn btn-primary">
-          Add account to {provider.displayName}
-        </button>
-      </div>
-      <p id={rulesId} className="mt-2 text-sm text-ink-muted">
-        The name becomes the account&apos;s id. Use letters, digits,{' '}
-        <code className="font-mono">-</code> and{' '}
-        <code className="font-mono">_</code>, at most {ACCOUNT_ID_MAX_LENGTH}{' '}
-        characters.
-      </p>
-      <p id={explanationId} className="mt-2 text-sm text-ink-muted">
-        {addExplanation(provider)}
-      </p>
+          <p id={rulesId} className="mt-1.5 text-ink-muted">
+            The nickname becomes the account&apos;s id. Use letters, digits,{' '}
+            <code className="font-mono">-</code> and{' '}
+            <code className="font-mono">_</code>, at most{' '}
+            {ACCOUNT_ID_MAX_LENGTH} characters.
+          </p>
+        </li>
+        {flow.steps.map((step, index) => (
+          <li key={index} className="text-ink-muted">
+            {step}
+          </li>
+        ))}
+        <li>
+          <button type="submit" disabled={disabled} className="btn btn-primary">
+            {flow.submitLabel}
+          </button>
+          <p id={explanationId} className="mt-1.5 text-ink-muted">
+            {flow.submitHint}
+          </p>
+        </li>
+      </ol>
       {validation !== null && (
-        <p id={errorId} className="mt-2 text-sm text-danger" role="alert">
+        <p id={errorId} className="mt-3 text-sm text-danger" role="alert">
           {validation}
         </p>
       )}
@@ -104,39 +112,41 @@ export default function AddAccountForm({
   )
 }
 
-function addExplanation(provider: ProviderDescriptor) {
+function addFlow(provider: ProviderDescriptor): {
+  heading: string
+  steps: ReactNode[]
+  submitLabel: string
+  submitHint: ReactNode
+} {
   if (provider.id === 'gemini-cli') {
-    return (
-      <>
-        This imports <code className="font-mono">GEMINI_API_KEY</code> from this
-        application&apos;s native parent process into CredentialStore. The key
-        is never typed into or returned to this webview. Start or restart this
-        application with the variable set; restart it again with a different
-        source key before adding another account. Only Gemini API-key accounts
-        are supported here, not Google OAuth accounts.
-      </>
-    )
+    return {
+      heading: 'Import API key',
+      steps: [
+        <>
+          Start or restart this application with{' '}
+          <code className="font-mono">GEMINI_API_KEY</code> set in the native
+          parent process. Restart again with a different source key before
+          importing another account.
+        </>,
+      ],
+      submitLabel: `Import API key for ${provider.displayName}`,
+      submitHint: (
+        <>
+          This copies the parent-process key into CredentialStore. The key is
+          never typed into or returned to this webview. Google OAuth is not
+          offered here.
+        </>
+      ),
+    }
   }
-  if (provider.id === 'grok-cli') {
-    return (
-      <>
-        Sign-in runs in {provider.displayName} itself, in the terminal that
-        launched this application. The vendor writes the credential into a
-        retained, isolated home for this account. This window does not host or
-        cancel that prompt, and leaving this page does not cancel it.
-      </>
-    )
+
+  return {
+    heading: `Sign in to ${provider.displayName}`,
+    steps: [],
+    submitLabel: `Sign in to ${provider.displayName}`,
+    submitHint:
+      'The vendor window or terminal completes OAuth. This window never takes a password or token.',
   }
-  return (
-    <>
-      Sign-in runs in {provider.displayName} itself, in the terminal that
-      launched this application. This window does not host the prompt. Adding an
-      account does not return until that sign-in finishes or fails. Closing this
-      window or leaving this page does not cancel that sign-in, and this
-      application cannot cancel it either. A window-hosted sign-in is not built
-      yet.
-    </>
-  )
 }
 
 /** Matches `account_id_is_safe` plus the Codex live-slot reservation. */

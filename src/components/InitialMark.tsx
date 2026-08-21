@@ -1,11 +1,8 @@
-/** Abstract initial badge. Not a vendor mark. */
+/** Abstract initial badge. Not a vendor mark. Color comes from --provider-color. */
 export default function InitialMark({ name }: { name: string }) {
   const initial = (name.trim().charAt(0) || '?').toLocaleUpperCase()
   return (
-    <span
-      aria-hidden="true"
-      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface text-xs font-semibold text-ink shadow-control"
-    >
+    <span aria-hidden="true" className="provider-mark">
       {initial}
     </span>
   )
