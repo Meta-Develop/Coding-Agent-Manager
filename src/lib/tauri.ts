@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type {
+  AuthKind,
   LaunchedProcess,
   ProviderAccountList,
   ProviderDescriptor,
@@ -30,8 +31,14 @@ export function listAccounts(
 export function addAccount(
   providerId: string,
   accountId: string,
+  authKind?: AuthKind,
 ): Promise<void> {
-  return invoke<void>('add_account', { providerId, accountId })
+  return invoke<void>(
+    'add_account',
+    authKind === undefined
+      ? { providerId, accountId }
+      : { providerId, accountId, authKind },
+  )
 }
 
 export function activateAccount(
