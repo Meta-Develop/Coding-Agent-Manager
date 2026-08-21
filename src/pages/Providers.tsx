@@ -42,11 +42,16 @@ export default function Providers() {
           </thead>
           <tbody>
             {providers.map((provider) => (
-              <tr key={provider.id}>
+              <tr
+                key={provider.id}
+                data-provider={provider.id}
+                className="provider-row"
+              >
                 <td className="font-medium">
                   <span className="inline-flex items-center gap-2.5">
                     <InitialMark name={provider.displayName} />
                     {provider.displayName}
+                    <span className="provider-chip">{provider.vendor}</span>
                   </span>
                 </td>
                 <td className="text-ink-muted">{provider.vendor}</td>

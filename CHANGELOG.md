@@ -116,6 +116,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Desktop chrome: sidebar mark and nav affordance, page canvas, card and table
   frames, status chips, and button treatments. Labels, capability gates, and
   error distinctions are unchanged.
+- Accounts add flow is numbered and OAuth-first where the adapter can start
+  vendor sign-in (Codex CLI, Grok CLI). Gemini is titled Import API key and
+  states that Google OAuth is not offered. Claude Code says this application
+  cannot start its sign-in yet. Cursor still offers no add control (`NFR-8`).
+- Provider sections on Accounts, Dashboard, and Providers use a left color
+  rail, initial mark, and vendor chip keyed by provider id. Brand-adjacent
+  hues only; no vendor marks.
+- Page chrome drops the canvas gradient, floating page card, and stacked
+  shadows in favor of hairlines, stronger ink contrast, and more space
+  between provider groups. Route pages lazy-load in production.
 - Declared minimum supported Rust version raised to 1.88, matching what the
   dependency tree already required.
 - Linux CI dependency list now names `libdbus-1-dev` explicitly rather than

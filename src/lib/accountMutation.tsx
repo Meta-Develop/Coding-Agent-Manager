@@ -234,12 +234,12 @@ function progressMessage(
 ): string {
   if (kind === 'add') {
     if (provider.id === 'gemini-cli') {
-      return `Importing ${accountId} for ${provider.displayName} from the native parent process into CredentialStore…`
+      return `Importing API key for ${accountId} from the native parent process into CredentialStore…`
     }
     if (provider.id === 'grok-cli') {
-      return `Adding ${accountId} to ${provider.displayName}. Vendor sign-in is waiting in the launching terminal and will write a retained isolated home; leaving this page does not cancel it.`
+      return `Signing in to ${provider.displayName} as ${accountId}. The vendor window or terminal completes OAuth and will write a retained isolated home; leaving this page does not cancel it.`
     }
-    return `Adding ${accountId} to ${provider.displayName}. Sign-in is waiting in the terminal that launched this application; this window will update when it finishes. Closing this window does not cancel that sign-in, and this application cannot cancel it either.`
+    return `Signing in to ${provider.displayName} as ${accountId}. The vendor window or terminal completes OAuth; this window will update when it finishes. Closing this window does not cancel that sign-in, and this application cannot cancel it either.`
   }
   if (kind === 'switch') {
     if (provider.capabilities.includes('launch-tool')) {
@@ -263,7 +263,10 @@ function successMessage(
   accountName: string,
 ): string {
   if (kind === 'add') {
-    return `Added ${accountId} to ${provider.displayName}.`
+    if (provider.id === 'gemini-cli') {
+      return `Imported API key for ${accountId}.`
+    }
+    return `Signed in to ${provider.displayName} as ${accountId}.`
   }
   if (kind === 'switch') {
     if (provider.capabilities.includes('launch-tool')) {
@@ -287,7 +290,10 @@ function failureLead(
   accountName: string,
 ): string {
   if (kind === 'add') {
-    return `Could not add ${accountId} to ${provider.displayName}:`
+    if (provider.id === 'gemini-cli') {
+      return `Could not import API key for ${accountId}:`
+    }
+    return `Could not sign in to ${provider.displayName} as ${accountId}:`
   }
   if (kind === 'switch') {
     if (provider.capabilities.includes('launch-tool')) {
