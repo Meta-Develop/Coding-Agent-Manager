@@ -115,7 +115,7 @@ export default function Accounts() {
         </p>
       )}
       {!loading && error === null && (
-        <div className="space-y-8" aria-busy={busy}>
+        <div className="space-y-10" aria-busy={busy}>
           {providers.length === 0 && (
             <p className="text-sm text-ink-muted">
               No providers were returned.
@@ -192,16 +192,24 @@ function ProviderAccounts({
   const canDelete = hasCapability(provider, 'delete-account')
 
   return (
-    <section aria-labelledby={headingId} className="panel p-5">
+    <section
+      aria-labelledby={headingId}
+      data-provider={provider.id}
+      className="provider-block"
+    >
       <div className="flex items-start gap-3">
         <InitialMark name={provider.displayName} />
         <div>
-          <h2 id={headingId} className="text-base font-semibold tracking-tight">
-            {provider.displayName}
-          </h2>
-          <p className="mt-1 text-xs text-ink-muted">
-            {provider.vendor} · {provider.maturity}
-          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2
+              id={headingId}
+              className="text-base font-semibold tracking-tight"
+            >
+              {provider.displayName}
+            </h2>
+            <span className="provider-chip">{provider.vendor}</span>
+          </div>
+          <p className="mt-1 text-xs text-ink-muted">{provider.maturity}</p>
         </div>
       </div>
       {listingBody({
@@ -223,6 +231,11 @@ function ProviderAccounts({
           {canLaunch
             ? "The tool's current identity is not stored here, so this application cannot select it for an app-owned launch."
             : "The tool's current identity is not stored here, so this application cannot switch back to it."}
+        </p>
+      )}
+      {provider.id === 'claude-code' && !canAdd && (
+        <p className="mt-3 text-sm text-ink-muted">
+          This application cannot start Claude sign-in yet.
         </p>
       )}
       {canAdd && (

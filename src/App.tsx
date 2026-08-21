@@ -5,7 +5,7 @@ import { AccountMutationProvider, MutationNotice } from '@/lib/accountMutation'
 export default function App() {
   return (
     <AccountMutationProvider>
-      <div className="flex h-full bg-surface-sunken">
+      <div className="flex h-full bg-surface">
         <Sidebar />
         <main className="app-canvas flex-1 overflow-y-auto">
           <div className="app-page">

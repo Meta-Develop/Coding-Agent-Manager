@@ -1,14 +1,29 @@
-import { StrictMode } from 'react'
+import { lazy, StrictMode, Suspense, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { createHashRouter, RouterProvider } from 'react-router-dom'
 import App from '@/App'
-import Dashboard from '@/pages/Dashboard'
-import Accounts from '@/pages/Accounts'
-import Providers from '@/pages/Providers'
-import Relay from '@/pages/Relay'
-import RouterRules from '@/pages/RouterRules'
-import Settings from '@/pages/Settings'
 import '@/index.css'
+
+const Dashboard = lazy(() => import('@/pages/Dashboard'))
+const Accounts = lazy(() => import('@/pages/Accounts'))
+const Providers = lazy(() => import('@/pages/Providers'))
+const Relay = lazy(() => import('@/pages/Relay'))
+const RouterRules = lazy(() => import('@/pages/RouterRules'))
+const Settings = lazy(() => import('@/pages/Settings'))
+
+function lazyPage(page: ReactNode) {
+  return (
+    <Suspense
+      fallback={
+        <p className="text-sm text-ink-muted" role="status">
+          Loading…
+        </p>
+      }
+    >
+      {page}
+    </Suspense>
+  )
+}
 
 // Hash routing keeps deep links working inside the Tauri webview without a
 // server-side rewrite rule.
@@ -17,12 +32,12 @@ const router = createHashRouter([
     path: '/',
     element: <App />,
     children: [
-      { index: true, element: <Dashboard /> },
-      { path: 'accounts', element: <Accounts /> },
-      { path: 'providers', element: <Providers /> },
-      { path: 'relay', element: <Relay /> },
-      { path: 'router', element: <RouterRules /> },
-      { path: 'settings', element: <Settings /> },
+      { index: true, element: lazyPage(<Dashboard />) },
+      { path: 'accounts', element: lazyPage(<Accounts />) },
+      { path: 'providers', element: lazyPage(<Providers />) },
+      { path: 'relay', element: lazyPage(<Relay />) },
+      { path: 'router', element: lazyPage(<RouterRules />) },
+      { path: 'settings', element: lazyPage(<Settings />) },
     ],
   },
 ])
