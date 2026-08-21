@@ -701,16 +701,44 @@ describe('Accounts page', () => {
     expect(alert).not.toHaveTextContent(/switched|active session changed/i)
   })
 
-  it('explains native Gemini key import and sends no key through IPC', async () => {
+  it('offers Gemini Google sign-in and sends oauth without a password field', async () => {
     const user = userEvent.setup()
     const add = vi.fn(async () => undefined)
     stubInvoke({
       providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
-      listings: [
-        listing('gemini-cli', {
-          outcome: { kind: 'listed-api-key-only' },
-        }),
-      ],
+      listings: [listing('gemini-cli')],
+      add,
+    })
+    renderApp()
+
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in to Gemini CLI' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/browser completes Google sign-in/i),
+    ).toHaveTextContent(/never takes a password/i)
+    expect(
+      screen.queryByLabelText(/password/i),
+    ).not.toBeInTheDocument()
+    await user.type(screen.getByRole('textbox', { name: 'Nickname' }), 'work')
+    await user.click(
+      screen.getByRole('button', { name: 'Sign in to Gemini CLI' }),
+    )
+
+    expect(add).toHaveBeenCalledWith('gemini-cli', 'work', 'oauth')
+    expect(callsOf('add_account').at(-1)?.[1]).toEqual({
+      providerId: 'gemini-cli',
+      accountId: 'work',
+      authKind: 'oauth',
+    })
+  })
+
+  it('imports a Gemini API key as a secondary path and sends no key through IPC', async () => {
+    const user = userEvent.setup()
+    const add = vi.fn(async () => undefined)
+    stubInvoke({
+      providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
+      listings: [listing('gemini-cli')],
       add,
     })
     renderApp()
@@ -730,16 +758,17 @@ describe('Accounts page', () => {
     expect(explanation).toHaveTextContent(
       /never typed into or returned to this webview/i,
     )
-    expect(explanation).toHaveTextContent(/Google OAuth is not offered here/i)
+    expect(explanation).not.toHaveTextContent(/Google OAuth is not offered here/i)
     await user.type(screen.getByRole('textbox', { name: 'Nickname' }), 'work')
     await user.click(
       screen.getByRole('button', { name: 'Import API key for Gemini CLI' }),
     )
 
-    expect(add).toHaveBeenCalledWith('gemini-cli', 'work')
+    expect(add).toHaveBeenCalledWith('gemini-cli', 'work', 'api-key')
     expect(callsOf('add_account').at(-1)?.[1]).toEqual({
       providerId: 'gemini-cli',
       accountId: 'work',
+      authKind: 'api-key',
     })
   })
 
@@ -804,7 +833,11 @@ function renderApp(path = '/accounts') {
 function stubInvoke(options: {
   providers?: ProviderDescriptor[]
   listings?: ProviderAccountList[] | (() => ProviderAccountList[])
-  add?: (providerId: string, accountId: string) => Promise<void>
+  add?: (
+    providerId: string,
+    accountId: string,
+    authKind?: string,
+  ) => Promise<void>
   activate?: (providerId: string, accountId: string) => Promise<void>
   remove?: (providerId: string, accountId: string) => Promise<void>
   launch?: (providerId: string) => Promise<LaunchedProcess>
@@ -814,6 +847,7 @@ function stubInvoke(options: {
     const payload = (args ?? {}) as {
       providerId?: string | null
       accountId?: string
+      authKind?: string
     }
     switch (command) {
       case 'list_providers':
@@ -824,7 +858,11 @@ function stubInvoke(options: {
           : (options.listings ?? [])
       case 'add_account':
         if (options.add) {
-          await options.add(payload.providerId ?? '', payload.accountId ?? '')
+          await options.add(
+            payload.providerId ?? '',
+            payload.accountId ?? '',
+            payload.authKind,
+          )
         }
         return undefined
       case 'activate_account':

@@ -21,6 +21,7 @@ import {
 import { listAccounts, listProviders } from '@/lib/tauri'
 import type {
   Account,
+  AuthKind,
   ProviderAccountList,
   ProviderCapability,
   ProviderDescriptor,
@@ -95,7 +96,13 @@ export default function Accounts() {
     )
     const accountName =
       account === undefined ? pending.accountId : accountDisplayName(account)
-    void runMutation(pending.kind, provider, pending.accountId, accountName)
+    void runMutation(
+      pending.kind,
+      provider,
+      pending.accountId,
+      accountName,
+      pending.authKind ?? account?.authKind,
+    )
   }
 
   return (
@@ -132,17 +139,18 @@ export default function Accounts() {
                   ? pending
                   : null
               }
-              onAdd={(accountId) =>
-                runMutation('add', provider, accountId, accountId)
+              onAdd={(accountId, authKind) =>
+                runMutation('add', provider, accountId, accountId, authKind)
               }
               onLaunch={(account) => {
                 void runLaunch(provider, accountDisplayName(account))
               }}
-              onRequest={(accountId, kind) =>
+              onRequest={(accountId, kind, authKind) =>
                 requestPending({
                   providerId: provider.id,
                   accountId,
                   kind,
+                  ...(authKind === undefined ? {} : { authKind }),
                 })
               }
               onCancelPending={cancelPending}
@@ -179,9 +187,9 @@ function ProviderAccounts({
   listing: ProviderAccountList | undefined
   busy: boolean
   pending: PendingConfirmation | null
-  onAdd: (accountId: string) => Promise<boolean>
+  onAdd: (accountId: string, authKind?: AuthKind) => Promise<boolean>
   onLaunch: (account: Account) => void
-  onRequest: (accountId: string, kind: PendingKind) => void
+  onRequest: (accountId: string, kind: PendingKind, authKind?: AuthKind) => void
   onCancelPending: () => void
   onConfirmPending: () => void
 }) {
@@ -267,7 +275,7 @@ function listingBody({
   canSwitch: boolean
   canLaunch: boolean
   canDelete: boolean
-  onRequest: (accountId: string, kind: PendingKind) => void
+  onRequest: (accountId: string, kind: PendingKind, authKind?: AuthKind) => void
   onLaunch: (account: Account) => void
   onCancelPending: () => void
   onConfirmPending: () => void
@@ -416,7 +424,7 @@ function AccountTable({
   canSwitch: boolean
   canLaunch: boolean
   canDelete: boolean
-  onRequest: (accountId: string, kind: PendingKind) => void
+  onRequest: (accountId: string, kind: PendingKind, authKind?: AuthKind) => void
   onLaunch: (account: Account) => void
   onCancelPending: () => void
   onConfirmPending: () => void
@@ -563,9 +571,14 @@ function AccountTable({
                             }
                             usesLaunchSelection={canLaunch}
                             canDelete={canDelete && account.isStored}
-                            forgetsMetadataOnly={provider.id === 'grok-cli'}
+                            forgetsMetadataOnly={retainsVendorHome(
+                              provider,
+                              account,
+                            )}
                             disabled={busy}
-                            onRequest={(kind) => onRequest(account.id, kind)}
+                            onRequest={(kind) =>
+                              onRequest(account.id, kind, account.authKind)
+                            }
                             onLaunch={() => onLaunch(account)}
                           />
                         )}
@@ -590,7 +603,7 @@ function AccountTable({
                               ? canLaunch
                                 ? `Confirm selection of ${accountDisplayName(account)} for app launch`
                                 : `Confirm switch to ${accountDisplayName(account)}`
-                              : provider.id === 'grok-cli'
+                              : retainsVendorHome(provider, account)
                                 ? `Confirm forgetting ${accountDisplayName(account)}`
                                 : `Confirm deletion of ${accountDisplayName(account)}`
                           }
@@ -599,7 +612,7 @@ function AccountTable({
                               ? canLaunch
                                 ? `Confirm selection of ${accountDisplayName(account)} for app launch`
                                 : `Confirm switch to ${accountDisplayName(account)}`
-                              : provider.id === 'grok-cli'
+                              : retainsVendorHome(provider, account)
                                 ? `Confirm forgetting ${accountDisplayName(account)}`
                                 : `Confirm deletion of ${accountDisplayName(account)}`
                           }
@@ -608,7 +621,7 @@ function AccountTable({
                               ? canLaunch
                                 ? 'Cancel launch selection'
                                 : 'Cancel switch'
-                              : provider.id === 'grok-cli'
+                              : retainsVendorHome(provider, account)
                                 ? 'Cancel forgetting'
                                 : 'Cancel deletion'
                           }
@@ -756,12 +769,12 @@ function deleteConfirmation(
   account: Account,
 ): ReactNode {
   const name = accountDisplayName(account)
-  if (provider.id === 'grok-cli') {
+  if (retainsVendorHome(provider, account)) {
     return (
       <>
         Forget {name} from this application&apos;s metadata? The vendor-written
         isolated home and credential deliberately remain on disk. This does not
-        sign out Grok CLI or destroy its credential.
+        sign out {provider.displayName} or destroy its credential.
       </>
     )
   }
@@ -801,4 +814,14 @@ function hasCapability(
   capability: ProviderCapability,
 ): boolean {
   return provider.capabilities.includes(capability)
+}
+
+function retainsVendorHome(
+  provider: ProviderDescriptor,
+  account: Account,
+): boolean {
+  return (
+    provider.id === 'grok-cli' ||
+    (provider.id === 'gemini-cli' && account.authKind === 'oauth')
+  )
 }

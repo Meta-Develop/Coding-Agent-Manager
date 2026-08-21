@@ -10,7 +10,7 @@ use coding_agent_manager_lib::model::{
 };
 use coding_agent_manager_lib::providers::gemini_cli::GeminiCliAdapter;
 use coding_agent_manager_lib::providers::{
-    add_managed_account, delete_managed_account, launch_spec_for, select_launch_account,
+    add_managed_account_for, delete_managed_account, launch_spec_for, select_launch_account,
     spawn_launch, ProviderAdapter, StoredAccountRegistry,
 };
 use coding_agent_manager_lib::storage::{CredentialStore, Secret, SecretRef};
@@ -113,20 +113,22 @@ fn api_key_accounts_use_credential_store_and_never_touch_gemini_config() {
     let store = FakeStore::default();
     let before = tree_bytes(&fixture.config);
 
-    add_managed_account(
+    add_managed_account_for(
         &registry,
         &fixture.adapter(Some(FAKE_KEY_WORK)),
         "work",
         "Work",
         Some(&store),
+        Some(AuthKind::ApiKey),
     )
     .expect("add work account");
-    add_managed_account(
+    add_managed_account_for(
         &registry,
         &fixture.adapter(Some(FAKE_KEY_PERSONAL)),
         "personal",
         "Personal",
         Some(&store),
+        Some(AuthKind::ApiKey),
     )
     .expect("add personal account");
 
@@ -258,8 +260,15 @@ fn gemini_adapter_spawn_applies_exact_key_removals_and_cwd() {
         .with_test_program(probe_program);
     let registry = fixture.registry();
     let store = FakeStore::default();
-    add_managed_account(&registry, &adapter, "work", "Work", Some(&store))
-        .expect("add work account");
+    add_managed_account_for(
+        &registry,
+        &adapter,
+        "work",
+        "Work",
+        Some(&store),
+        Some(AuthKind::ApiKey),
+    )
+    .expect("add work account");
     select_launch_account(&registry, &adapter, "work").expect("select work");
     let selected = registry
         .selected(PROVIDER_ID)
@@ -397,7 +406,7 @@ fn malformed_or_unusable_metadata_and_settings_fail_closed() {
 }
 
 #[test]
-fn descriptor_advertises_only_the_complete_api_key_lifecycle() {
+fn descriptor_advertises_oauth_default_and_api_key_import() {
     let fixture = Fixture::new();
     let adapter = fixture.adapter(None);
     assert_eq!(
@@ -410,8 +419,70 @@ fn descriptor_advertises_only_the_complete_api_key_lifecycle() {
         ]
     );
     let plan = adapter.managed_account_plan().expect("managed plan");
-    assert_eq!(plan.auth_kind, AuthKind::ApiKey);
-    assert_eq!(plan.material, StoredAccountMaterial::CredentialStore);
+    assert_eq!(plan.auth_kind, AuthKind::OAuth);
+    assert_eq!(plan.material, StoredAccountMaterial::VendorHome);
+    let api_key = adapter
+        .managed_account_plan_for(AuthKind::ApiKey)
+        .expect("api-key plan");
+    assert_eq!(api_key.auth_kind, AuthKind::ApiKey);
+    assert_eq!(api_key.material, StoredAccountMaterial::CredentialStore);
+}
+
+#[test]
+fn oauth_add_writes_isolated_home_and_delete_retains_it() {
+    let fixture = Fixture::new();
+    let registry = fixture.registry();
+    let before = tree_bytes(&fixture.config);
+    let adapter = fixture
+        .adapter(None)
+        .with_oauth_completer(write_isolated_oauth);
+    add_managed_account_for(
+        &registry,
+        &adapter,
+        "work",
+        "Work",
+        None,
+        Some(AuthKind::OAuth),
+    )
+    .expect("oauth add");
+    let managed = fixture.data.join("accounts/gemini-cli/work");
+    assert!(managed.join(".gemini/oauth_creds.json").is_file());
+    assert_eq!(before, tree_bytes(&fixture.config));
+    let accounts = adapter.list_accounts().expect("list");
+    assert_eq!(accounts.len(), 1);
+    let masked = accounts[0]
+        .masked_identity
+        .as_deref()
+        .expect("masked identity");
+    assert!(masked.contains("***@"));
+    assert!(!masked.contains("FAKE-user-0001"));
+    let surfaces = format!(
+        "{accounts:?} {}",
+        serde_json::to_string(&accounts).expect("json")
+    );
+    assert!(!surfaces.contains("FAKE-"));
+    delete_managed_account(&registry, &adapter, "work", None).expect("forget");
+    assert!(registry.account(PROVIDER_ID, "work").is_err());
+    assert!(
+        managed.join(".gemini/oauth_creds.json").is_file(),
+        "OAuth delete must retain the isolated home"
+    );
+    assert_eq!(before, tree_bytes(&fixture.config));
+}
+
+fn write_isolated_oauth(home: &Path) -> Result<()> {
+    fs::create_dir_all(home.join(".gemini")).expect("oauth dir");
+    fs::write(
+        home.join(".gemini/oauth_creds.json"),
+        b"FAKE-gemini-oauth-creds-0001",
+    )
+    .expect("creds");
+    fs::write(
+        home.join(".gemini/google_accounts.json"),
+        br#"{"active":"FAKE-user-0001@example.invalid","old":[]}"#,
+    )
+    .expect("accounts");
+    Ok(())
 }
 
 fn complete_account(id: &str) -> StoredAccountMetadata {

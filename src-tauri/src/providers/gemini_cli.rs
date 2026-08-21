@@ -1,26 +1,29 @@
 //! Gemini CLI (Google) adapter.
 //!
-//! API-key account switching is launch-only: core stores the key in a
+//! API-key switching is launch-only: core stores the key in a
 //! [`CredentialStore`](crate::storage::CredentialStore), persists only
 //! non-secret selection metadata, and sets `GEMINI_API_KEY` on the selected
-//! child. No Gemini-owned file is written. The effective auth-mode gate below
-//! follows the pinned first-party source recorded in
-//! `docs/research/gemini-cli.md` `[verified-source]`.
+//! child. No Gemini-owned file is written.
 //!
-//! OAuth credentials remain read-only research. This adapter never replaces
-//! `oauth_creds.json`, `google_accounts.json`, or `settings.json`.
+//! OAuth add writes an isolated `GEMINI_CLI_HOME` with Gemini CLI's
+//! `oauth_creds.json` / `google_accounts.json` pair via in-app Google
+//! loopback. This adapter never writes the live `~/.gemini` tree. The
+//! effective auth-mode gate follows the pinned first-party source in
+//! `docs/research/gemini-cli.md` `[verified-source]`.
 
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
 use super::{
-    account_id_is_safe, binary_on_path, home_dir, ActivationMechanism, LaunchSpec,
-    ManagedAccountPlan, ProviderAdapter, StoredAccountRegistry,
+    account_id_is_safe, binary_on_path, home_dir, managed_account_dir, ActivationMechanism,
+    LaunchSpec, ManagedAccountPlan, ProviderAdapter, StoredAccountRegistry,
 };
 use crate::error::{Error, Result};
+use crate::fsx;
 use crate::model::{
     Account, AuthKind, InstallState, Maturity, ProviderCapability, ProviderDescriptor,
     StoredAccountMaterial, StoredAccountMetadata, StoredAccountState,
@@ -29,7 +32,10 @@ use crate::storage::Secret;
 
 const PROVIDER_ID: &str = "gemini-cli";
 const API_KEY_ENV: &str = "GEMINI_API_KEY";
+const HOME_ENV: &str = "GEMINI_CLI_HOME";
+const GCA_ENV: &str = "GOOGLE_GENAI_USE_GCA";
 const API_KEY_AUTH_TYPE: &str = "gemini-api-key";
+const OAUTH_AUTH_TYPE: &str = "oauth-personal";
 const AMBIENT_API_KEY_ACCOUNT_ID: &str = "gemini-cli-ambient-api-key";
 
 const REMOVED_AUTH_ENVIRONMENT: &[&str] = &[
@@ -40,6 +46,17 @@ const REMOVED_AUTH_ENVIRONMENT: &[&str] = &[
     "CLOUD_SHELL",
     "GEMINI_CLI_USE_COMPUTE_ADC",
 ];
+
+const OAUTH_REMOVED_AUTH_ENVIRONMENT: &[&str] = &[
+    "GEMINI_API_KEY",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GOOGLE_GEMINI_BASE_URL",
+    "GOOGLE_API_KEY",
+    "CLOUD_SHELL",
+    "GEMINI_CLI_USE_COMPUTE_ADC",
+];
+
+type OAuthCompleter = fn(&Path) -> Result<()>;
 
 /// `None` is production and reads process state. `Some` is a hermetic test
 /// context: every environment-derived value must come from injected fields.
@@ -58,6 +75,8 @@ pub struct GeminiCliAdapter {
     home: Option<PathBuf>,
     injected: Option<InjectedContext>,
     test_program: Option<PathBuf>,
+    /// Test seam that writes isolated OAuth files and never opens a browser.
+    oauth_completer: Option<OAuthCompleter>,
 }
 
 impl fmt::Debug for GeminiCliAdapter {
@@ -86,6 +105,7 @@ impl GeminiCliAdapter {
             }),
             home: Some(home),
             test_program: None,
+            oauth_completer: None,
         }
     }
 
@@ -111,7 +131,14 @@ impl GeminiCliAdapter {
                 api_key: api_key.map(|value| value.as_bytes().to_vec()),
             }),
             test_program: None,
+            oauth_completer: None,
         }
+    }
+
+    /// Complete isolated Google sign-in without a browser or the network.
+    pub fn with_oauth_completer(mut self, completer: OAuthCompleter) -> Self {
+        self.oauth_completer = Some(completer);
+        self
     }
 
     /// Replace the fixed `gemini` executable only inside an already-hermetic
@@ -221,12 +248,69 @@ impl GeminiCliAdapter {
         Ok(Secret::new(bytes))
     }
 
-    fn validate_effective_auth(&self, cwd: &Path) -> Result<()> {
-        let home = self.resolved_home_for(cwd)?;
-        let paths = self.settings_paths(cwd, &home);
+    fn required_data_dir(&self) -> Result<PathBuf> {
+        let directory = self
+            .resolved_data_dir()
+            .ok_or_else(|| config_write("application data directory unavailable"))?;
+        if !directory.is_absolute() {
+            return Err(config_write(
+                "application data directory is not an absolute path",
+            ));
+        }
+        Ok(directory)
+    }
+
+    fn managed_home(&self, account: &StoredAccountMetadata) -> Result<PathBuf> {
+        self.validate_metadata(account)?;
+        Ok(managed_account_dir(
+            &self.required_data_dir()?,
+            PROVIDER_ID,
+            &account.id,
+        ))
+    }
+
+    fn complete_oauth(&self, home: &Path) -> Result<()> {
+        if let Some(completer) = self.oauth_completer {
+            return completer(home);
+        }
+        if self.injected.is_some() {
+            return Err(config_write(
+                "hermetic Gemini OAuth requires an injected completer",
+            ));
+        }
+        super::gemini_oauth::provision_managed_home(home)
+    }
+
+    fn provision_oauth_home(&self, account: &StoredAccountMetadata) -> Result<()> {
+        let home = self.managed_home(account)?;
+        ensure_private_managed_home(&self.required_data_dir()?, &home)?;
+        match fs::symlink_metadata(oauth_creds_path(&home)) {
+            Ok(_) => {
+                validate_oauth_creds(&home)?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(config_write(format!(
+                    "managed oauth_creds.json cannot be inspected ({})",
+                    error.kind()
+                )))
+            }
+        }
+        self.complete_oauth(&home)?;
+        validate_oauth_creds(&home)
+    }
+
+    fn masked_oauth_identity(&self, account: &StoredAccountMetadata) -> Option<String> {
+        let home = self.managed_home(account).ok()?;
+        masked_active_email(&google_accounts_path(&home))
+    }
+
+    fn validate_effective_auth(&self, cwd: &Path, home: &Path, expected: &str) -> Result<()> {
+        let paths = self.settings_paths(cwd, home);
         let system_defaults = read_auth_settings(&paths.system_defaults)?;
         let user = read_auth_settings(&paths.user)?;
-        let workspace = if same_location(cwd, &home) {
+        let workspace = if same_location(cwd, home) {
             AuthSettings::default()
         } else {
             read_auth_settings(&paths.workspace)?
@@ -234,8 +318,8 @@ impl GeminiCliAdapter {
         let system = read_auth_settings(&paths.system)?;
 
         // Workspace trust is intentionally not inferred. Requiring both
-        // possible merge outcomes to select the API-key mode prevents an
-        // untrusted workspace override from producing a false allow.
+        // possible merge outcomes to agree prevents an untrusted workspace
+        // override from producing a false allow.
         let mut without_workspace = AuthSettings::default();
         without_workspace.overlay(system_defaults.clone());
         without_workspace.overlay(user.clone());
@@ -247,20 +331,26 @@ impl GeminiCliAdapter {
         with_workspace.overlay(workspace);
         with_workspace.overlay(system);
 
-        validate_auth_outcome(&without_workspace)?;
-        validate_auth_outcome(&with_workspace)
+        validate_auth_outcome(&without_workspace, expected)?;
+        validate_auth_outcome(&with_workspace, expected)
     }
 
     fn validate_metadata(&self, account: &StoredAccountMetadata) -> Result<()> {
         if account.provider_id != PROVIDER_ID {
             return Err(Error::UnknownProvider(account.provider_id.clone()));
         }
-        if !account_id_is_safe(&account.id)
-            || account.auth_kind != AuthKind::ApiKey
-            || account.material != StoredAccountMaterial::CredentialStore
-        {
+        if !account_id_is_safe(&account.id) {
             return Err(config_read(
-                "stored account metadata does not match the Gemini API-key lifecycle",
+                "stored account metadata does not match the Gemini lifecycle",
+            ));
+        }
+        let matches_api_key = account.auth_kind == AuthKind::ApiKey
+            && account.material == StoredAccountMaterial::CredentialStore;
+        let matches_oauth = account.auth_kind == AuthKind::OAuth
+            && account.material == StoredAccountMaterial::VendorHome;
+        if !matches_api_key && !matches_oauth {
+            return Err(config_read(
+                "stored account metadata does not match a Gemini lifecycle",
             ));
         }
         Ok(())
@@ -277,8 +367,6 @@ impl ProviderAdapter for GeminiCliAdapter {
             id: self.id().to_string(),
             display_name: "Gemini CLI".to_string(),
             vendor: "Google".to_string(),
-            // Gemini supports OAuth too, but this adapter writes only the
-            // source-verified API-key launch path.
             auth_kinds: vec![AuthKind::OAuth, AuthKind::ApiKey],
             maturity: Maturity::Experimental,
             install_state: self.detect(),
@@ -332,14 +420,21 @@ impl ProviderAdapter for GeminiCliAdapter {
         let mut accounts: Vec<Account> = metadata
             .iter()
             .map(|stored| {
-                let binding_matches = stored.auth_kind == AuthKind::ApiKey
-                    && stored.material == StoredAccountMaterial::CredentialStore;
+                let binding_matches = matches!(
+                    (stored.auth_kind, stored.material),
+                    (AuthKind::ApiKey, StoredAccountMaterial::CredentialStore)
+                        | (AuthKind::OAuth, StoredAccountMaterial::VendorHome)
+                );
                 let complete = stored.state == StoredAccountState::Complete && binding_matches;
                 Account {
                     id: stored.id.clone(),
                     provider_id: PROVIDER_ID.to_string(),
                     label: stored.label.clone(),
-                    masked_identity: None,
+                    masked_identity: if stored.auth_kind == AuthKind::OAuth {
+                        self.masked_oauth_identity(stored)
+                    } else {
+                        None
+                    },
                     auth_kind: stored.auth_kind,
                     // Manager selection does not claim what an independently
                     // launched Gemini process is currently using.
@@ -384,7 +479,26 @@ impl ProviderAdapter for GeminiCliAdapter {
             return Err(Error::UnknownAccount(account.id.clone()));
         }
         let cwd = self.cwd()?;
-        self.validate_effective_auth(&cwd)?;
+        if account.auth_kind == AuthKind::OAuth {
+            let home = self.managed_home(account)?;
+            validate_oauth_creds(&home)?;
+            self.validate_effective_auth(&cwd, &home, OAUTH_AUTH_TYPE)?;
+            let mut spec = LaunchSpec::new(
+                self.test_program
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("gemini")),
+            )
+            .current_dir(cwd)
+            .set_plain_env(HOME_ENV, home.as_os_str())
+            .set_plain_env(GCA_ENV, "true");
+            for name in OAUTH_REMOVED_AUTH_ENVIRONMENT {
+                spec = spec.remove_env(*name);
+            }
+            return Ok(spec);
+        }
+
+        let home = self.resolved_home_for(&cwd)?;
+        self.validate_effective_auth(&cwd, &home, API_KEY_AUTH_TYPE)?;
         let mut spec = LaunchSpec::new(
             self.test_program
                 .clone()
@@ -400,9 +514,23 @@ impl ProviderAdapter for GeminiCliAdapter {
 
     fn managed_account_plan(&self) -> Option<ManagedAccountPlan> {
         Some(ManagedAccountPlan {
-            auth_kind: AuthKind::ApiKey,
-            material: StoredAccountMaterial::CredentialStore,
+            auth_kind: AuthKind::OAuth,
+            material: StoredAccountMaterial::VendorHome,
         })
+    }
+
+    fn managed_account_plan_for(&self, auth_kind: AuthKind) -> Option<ManagedAccountPlan> {
+        match auth_kind {
+            AuthKind::OAuth => Some(ManagedAccountPlan {
+                auth_kind: AuthKind::OAuth,
+                material: StoredAccountMaterial::VendorHome,
+            }),
+            AuthKind::ApiKey => Some(ManagedAccountPlan {
+                auth_kind: AuthKind::ApiKey,
+                material: StoredAccountMaterial::CredentialStore,
+            }),
+            AuthKind::Unknown => None,
+        }
     }
 
     fn provision_stored_account(&self, account: &StoredAccountMetadata) -> Result<Option<Secret>> {
@@ -412,11 +540,32 @@ impl ProviderAdapter for GeminiCliAdapter {
                 "only an unselected pending Gemini account can be provisioned",
             ));
         }
+        if account.auth_kind == AuthKind::OAuth {
+            self.provision_oauth_home(account)?;
+            return Ok(None);
+        }
         self.import_api_key().map(Some)
     }
 
     fn validate_stored_account_delete(&self, account: &StoredAccountMetadata) -> Result<()> {
-        self.validate_metadata(account)
+        self.validate_metadata(account)?;
+        if account.auth_kind != AuthKind::OAuth {
+            return Ok(());
+        }
+        let home = self.managed_home(account)?;
+        match fs::symlink_metadata(&home) {
+            Ok(_) => validate_directory(&home, "managed Gemini home"),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && account.state == StoredAccountState::Pending =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(config_write(format!(
+                "managed Gemini home cannot be inspected ({})",
+                error.kind()
+            ))),
+        }
     }
 
     fn activate_account(&self, _account_id: &str) -> Result<()> {
@@ -460,20 +609,30 @@ struct SettingsPaths {
     system: PathBuf,
 }
 
-fn validate_auth_outcome(settings: &AuthSettings) -> Result<()> {
-    if settings.selected_type.as_deref() != Some(API_KEY_AUTH_TYPE) {
+fn validate_auth_outcome(settings: &AuthSettings, expected: &str) -> Result<()> {
+    if expected == API_KEY_AUTH_TYPE {
+        if settings.selected_type.as_deref() != Some(API_KEY_AUTH_TYPE) {
+            return Err(config_read(
+                "effective security.auth.selectedType must be `gemini-api-key`",
+            ));
+        }
+    } else if settings
+        .selected_type
+        .as_deref()
+        .is_some_and(|value| value != expected)
+    {
         return Err(config_read(
-            "effective security.auth.selectedType must be `gemini-api-key`",
+            "effective security.auth.selectedType conflicts with `oauth-personal`",
         ));
     }
     if settings
         .enforced_type
         .as_deref()
-        .is_some_and(|value| value != API_KEY_AUTH_TYPE)
+        .is_some_and(|value| value != expected)
     {
-        return Err(config_read(
-            "effective security.auth.enforcedType conflicts with `gemini-api-key`",
-        ));
+        return Err(config_read(format!(
+            "effective security.auth.enforcedType conflicts with `{expected}`"
+        )));
     }
     if settings.use_external == Some(true) {
         return Err(config_read(
@@ -705,9 +864,92 @@ fn config_read(reason: impl Into<String>) -> Error {
     }
 }
 
+fn config_write(reason: impl Into<String>) -> Error {
+    Error::ConfigWrite {
+        provider: PROVIDER_ID.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn oauth_creds_path(home: &Path) -> PathBuf {
+    home.join(".gemini/oauth_creds.json")
+}
+
+fn google_accounts_path(home: &Path) -> PathBuf {
+    home.join(".gemini/google_accounts.json")
+}
+
+fn validate_directory(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| config_write(format!("{label} cannot be inspected ({})", error.kind())))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(config_write(format!(
+            "{label} is not a non-symlink directory"
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(config_write(format!("{label} is not owner-only")));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_private_managed_home(data_dir: &Path, home: &Path) -> Result<()> {
+    let accounts = data_dir.join("accounts");
+    let provider = accounts.join(PROVIDER_ID);
+    for (directory, label) in [
+        (data_dir, "application data directory"),
+        (accounts.as_path(), "managed accounts directory"),
+        (provider.as_path(), "Gemini provider directory"),
+        (home, "managed Gemini home"),
+    ] {
+        match fs::symlink_metadata(directory) {
+            Ok(_) => validate_directory(directory, label)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fsx::create_dir_all_private(directory)?;
+                validate_directory(directory, label)?;
+            }
+            Err(error) => {
+                return Err(config_write(format!(
+                    "{label} cannot be inspected ({})",
+                    error.kind()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Presence and type only. Token bytes are never read into errors or logs.
+fn validate_oauth_creds(home: &Path) -> Result<()> {
+    let path = oauth_creds_path(home);
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        config_write(format!(
+            "managed oauth_creds.json cannot be inspected ({})",
+            error.kind()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(config_write(
+            "managed oauth_creds.json is not a regular non-symlink file",
+        ));
+    }
+    Ok(())
+}
+
+fn masked_active_email(path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    let email = value.get("active").and_then(Value::as_str)?;
+    super::gemini_oauth::mask_email(email)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::LaunchEnvironment;
+    use super::super::{add_managed_account_for, LaunchEnvironment, StoredAccountRegistry};
     use super::*;
 
     const TEST_KEY: &str = "FAKE-gemini-key-0001";
@@ -870,5 +1112,298 @@ mod tests {
         )
         .expect("dynamic");
         assert!(adapter.launch_spec(&account).is_err());
+    }
+
+    fn oauth_metadata(id: &str, state: StoredAccountState) -> StoredAccountMetadata {
+        StoredAccountMetadata {
+            id: id.to_string(),
+            provider_id: PROVIDER_ID.to_string(),
+            label: "Fixture".to_string(),
+            auth_kind: AuthKind::OAuth,
+            state,
+            material: StoredAccountMaterial::VendorHome,
+            is_selected: false,
+        }
+    }
+
+    fn write_oauth_files(home: &Path) -> Result<()> {
+        super::super::gemini_oauth::write_fake_oauth_home(home, None)
+    }
+
+    fn write_oauth_files_with_email(home: &Path) -> Result<()> {
+        super::super::gemini_oauth::write_fake_oauth_home(
+            home,
+            Some("FAKE-user-0001@example.invalid"),
+        )
+    }
+
+    fn fail_oauth(_home: &Path) -> Result<()> {
+        Err(config_write("injected Gemini OAuth completer failed"))
+    }
+
+    fn empty_oauth(_home: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    fn panic_oauth(_home: &Path) -> Result<()> {
+        panic!("a structurally complete pending home must not run OAuth again")
+    }
+
+    fn oauth_adapter(completer: OAuthCompleter) -> (tempfile::TempDir, GeminiCliAdapter) {
+        let (dir, adapter) = context(None);
+        (dir, adapter.with_oauth_completer(completer))
+    }
+
+    fn registry_for(adapter: &GeminiCliAdapter) -> StoredAccountRegistry {
+        StoredAccountRegistry::new(crate::paths::stored_accounts_path(
+            &adapter.resolved_data_dir().expect("data dir"),
+        ))
+    }
+
+    fn assert_no_fake(where_: &str, text: &str) {
+        assert!(
+            !text.contains("FAKE-"),
+            "{where_} leaked fixture secret material: {text}"
+        );
+    }
+
+    #[test]
+    fn oauth_completer_lists_complete_account_without_leaking() {
+        let (_dir, adapter) = oauth_adapter(write_oauth_files);
+        add_managed_account_for(
+            &registry_for(&adapter),
+            &adapter,
+            "work",
+            "Work",
+            None,
+            Some(AuthKind::OAuth),
+        )
+        .expect("oauth add");
+        let accounts = adapter.list_accounts().expect("list");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].auth_kind, AuthKind::OAuth);
+        assert!(accounts[0].is_stored);
+        assert!(!accounts[0].is_incomplete);
+        assert_eq!(accounts[0].masked_identity, None);
+        let surfaces = format!(
+            "{accounts:?} {}",
+            serde_json::to_string(&accounts).expect("json")
+        );
+        assert_no_fake("oauth list", &surfaces);
+        assert!(!format!("{adapter:?}").contains("FAKE-"));
+    }
+
+    #[test]
+    fn oauth_active_email_is_masked_and_old_is_not_a_second_account() {
+        let (_dir, adapter) = oauth_adapter(write_oauth_files_with_email);
+        add_managed_account_for(
+            &registry_for(&adapter),
+            &adapter,
+            "work",
+            "Work",
+            None,
+            Some(AuthKind::OAuth),
+        )
+        .expect("oauth add");
+        let accounts = adapter.list_accounts().expect("list");
+        assert_eq!(accounts.len(), 1);
+        let masked = accounts[0]
+            .masked_identity
+            .as_deref()
+            .expect("masked identity");
+        assert!(masked.contains("***@"), "identity was not masked: {masked}");
+        assert!(!masked.contains("FAKE-user-0001"));
+        assert_ne!(masked, "FAKE-user-0001@example.invalid");
+        let surfaces = format!(
+            "{accounts:?} {}",
+            serde_json::to_string(&accounts).expect("json")
+        );
+        assert_no_fake("masked oauth list", &surfaces);
+        assert!(!surfaces.contains("FAKE-user-0001@example.invalid"));
+    }
+
+    #[test]
+    fn oauth_failure_or_missing_creds_is_not_complete() {
+        let (_dir, adapter) = oauth_adapter(fail_oauth);
+        let error = add_managed_account_for(
+            &registry_for(&adapter),
+            &adapter,
+            "work",
+            "Work",
+            None,
+            Some(AuthKind::OAuth),
+        )
+        .expect_err("failed oauth");
+        assert_no_fake("oauth failure", &format!("{error} {error:?}"));
+        let accounts = adapter.list_accounts().expect("list pending");
+        assert!(accounts.iter().all(|account| account.is_incomplete));
+        assert!(accounts
+            .iter()
+            .all(|account| !account.is_selected_for_launch));
+
+        let (_dir, adapter) = oauth_adapter(empty_oauth);
+        let error = add_managed_account_for(
+            &registry_for(&adapter),
+            &adapter,
+            "missing",
+            "Missing",
+            None,
+            Some(AuthKind::OAuth),
+        )
+        .expect_err("missing creds");
+        assert_no_fake("missing creds", &format!("{error} {error:?}"));
+        let accounts = adapter.list_accounts().expect("list missing");
+        assert!(accounts
+            .iter()
+            .find(|account| account.id == "missing")
+            .is_some_and(|account| account.is_incomplete));
+    }
+
+    #[test]
+    fn oauth_recovery_revalidates_without_a_second_flow() {
+        let (dir, adapter) = oauth_adapter(panic_oauth);
+        let home = managed_account_dir(
+            &adapter.resolved_data_dir().expect("data dir"),
+            PROVIDER_ID,
+            "work",
+        );
+        ensure_private_managed_home(&adapter.resolved_data_dir().expect("data dir"), &home)
+            .expect("home");
+        write_oauth_files(&home).expect("existing creds");
+        let _ = dir;
+        adapter
+            .provision_stored_account(&oauth_metadata("work", StoredAccountState::Pending))
+            .expect("recovery");
+    }
+
+    #[test]
+    fn oauth_add_writes_only_the_managed_directory() {
+        let (_dir, adapter) = oauth_adapter(write_oauth_files);
+        let home = managed_account_dir(
+            &adapter.resolved_data_dir().expect("data dir"),
+            PROVIDER_ID,
+            "work",
+        );
+        adapter
+            .provision_stored_account(&oauth_metadata("work", StoredAccountState::Pending))
+            .expect("provision");
+        assert!(oauth_creds_path(&home).is_file());
+        assert!(!home.join(".gemini/settings.json").exists());
+        let live = adapter
+            .resolved_home_for(&adapter.cwd().expect("cwd"))
+            .expect("live home");
+        assert!(!oauth_creds_path(&live).exists());
+    }
+
+    #[test]
+    fn oauth_launch_spec_sets_home_and_gca_and_removes_competing_auth() {
+        let (_dir, adapter) = oauth_adapter(write_oauth_files);
+        add_managed_account_for(
+            &registry_for(&adapter),
+            &adapter,
+            "work",
+            "Work",
+            None,
+            Some(AuthKind::OAuth),
+        )
+        .expect("oauth add");
+        let mut account = oauth_metadata("work", StoredAccountState::Complete);
+        account.is_selected = true;
+        let spec = adapter.launch_spec(&account).expect("oauth launch");
+        assert_eq!(spec.program, PathBuf::from("gemini"));
+        assert!(spec.args.is_empty());
+        assert_eq!(
+            spec.working_directory.as_deref(),
+            adapter.cwd().ok().as_deref()
+        );
+        let home = managed_account_dir(
+            &adapter.resolved_data_dir().expect("data dir"),
+            PROVIDER_ID,
+            "work",
+        );
+        let mut plain = Vec::new();
+        let mut removed = Vec::new();
+        for entry in spec.environment {
+            match entry {
+                LaunchEnvironment::SetPlain { name, value } => {
+                    plain.push((name, value));
+                }
+                LaunchEnvironment::Remove { name } => removed.push(name),
+                LaunchEnvironment::SetSecret { name } => {
+                    panic!("unexpected secret environment {name}")
+                }
+            }
+        }
+        assert_eq!(
+            plain,
+            vec![
+                (HOME_ENV.to_string(), home.into_os_string()),
+                (GCA_ENV.to_string(), "true".into()),
+            ]
+        );
+        assert_eq!(removed, OAUTH_REMOVED_AUTH_ENVIRONMENT);
+        assert!(!removed.iter().any(|name| name == GCA_ENV));
+    }
+
+    #[test]
+    fn oauth_launch_refuses_conflicting_or_external_auth() {
+        let (dir, adapter) = oauth_adapter(write_oauth_files);
+        add_managed_account_for(
+            &registry_for(&adapter),
+            &adapter,
+            "work",
+            "Work",
+            None,
+            Some(AuthKind::OAuth),
+        )
+        .expect("oauth add");
+        let account = oauth_metadata("work", StoredAccountState::Complete);
+        assert!(adapter.launch_spec(&account).is_ok());
+
+        let workspace = adapter.cwd().expect("cwd").join(".gemini/settings.json");
+        fs::write(
+            &workspace,
+            r#"{"security":{"auth":{"selectedType":"gemini-api-key"}}}"#,
+        )
+        .expect("workspace api-key");
+        assert!(adapter.launch_spec(&account).is_err());
+
+        fs::write(
+            &workspace,
+            r#"{"security":{"auth":{"selectedType":"oauth-personal"}}}"#,
+        )
+        .expect("workspace oauth");
+        assert!(adapter.launch_spec(&account).is_ok());
+
+        fs::create_dir_all(dir.path().join("system")).expect("system dir");
+        fs::write(
+            dir.path().join("system/settings.json"),
+            r#"{"security":{"auth":{"enforcedType":"gemini-api-key"}}}"#,
+        )
+        .expect("enforced api-key");
+        assert!(adapter.launch_spec(&account).is_err());
+
+        fs::write(
+            dir.path().join("system/settings.json"),
+            r#"{"security":{"auth":{"selectedType":"oauth-personal","useExternal":true}}}"#,
+        )
+        .expect("external");
+        assert!(adapter.launch_spec(&account).is_err());
+    }
+
+    #[test]
+    fn default_plan_is_oauth_and_api_key_plan_remains_available() {
+        let (_dir, adapter) = context(None);
+        let default = adapter.managed_account_plan().expect("default");
+        assert_eq!(default.auth_kind, AuthKind::OAuth);
+        assert_eq!(default.material, StoredAccountMaterial::VendorHome);
+        let api_key = adapter
+            .managed_account_plan_for(AuthKind::ApiKey)
+            .expect("api-key");
+        assert_eq!(api_key.auth_kind, AuthKind::ApiKey);
+        assert_eq!(api_key.material, StoredAccountMaterial::CredentialStore);
+        assert!(adapter
+            .provision_stored_account(&oauth_metadata("work", StoredAccountState::Pending))
+            .is_err());
     }
 }

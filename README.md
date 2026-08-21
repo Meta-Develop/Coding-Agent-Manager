@@ -155,9 +155,10 @@ with [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 Coding Agent Manager is an independent implementation. It was inspired by the
 _problem_ that [`lbjlaq/Antigravity-Manager`][upstream] solves for a single
-vendor, and applies a provider-adapter design across multiple coding agents. It
-shares no code, assets, or text with that project, and is not a fork of it. The
-reasoning is recorded in
+vendor, and applies a provider-adapter design across multiple coding agents.
+The Gemini Google OAuth loopback and token-exchange approach is adapted from
+that project and credited in [`NOTICE`](NOTICE). This project is not a fork of
+it. The reasoning is recorded in
 [`docs/adr/0006-clean-room-independent-implementation.md`](docs/adr/0006-clean-room-independent-implementation.md).
 
 [upstream]: https://github.com/lbjlaq/Antigravity-Manager

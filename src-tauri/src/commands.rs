@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::model::{
-    Account, AccountListError, AccountListErrorKind, AccountListOutcome, LaunchedProcess,
+    Account, AccountListError, AccountListErrorKind, AccountListOutcome, AuthKind, LaunchedProcess,
     ProviderAccountList, ProviderDescriptor, ProviderQuotaList, QuotaListError, QuotaListErrorKind,
     QuotaListOutcome, QuotaSnapshot, RelayStatus, RouteRule,
 };
@@ -27,9 +27,9 @@ use crate::storage;
 ///
 /// Ceiling: this list is a stand-in for an adapter-reported inspect-scope,
 /// which would be a trait change (out of scope for the IPC/UI boundary).
-/// Drop `gemini-cli` when that adapter starts reading the OAuth credential
-/// file (`docs/research/gemini-cli.md` §2–§3).
-const API_KEY_ONLY_LISTING: &[&str] = &["gemini-cli"];
+/// Gemini is omitted: it lists stored OAuth vendor-home accounts and may
+/// mask `google_accounts.json` `active` without reading token bytes.
+const API_KEY_ONLY_LISTING: &[&str] = &[];
 
 const ROUTE_RULES_SCHEMA_VERSION: u32 = 1;
 const ROUTE_RULES_FILE: &str = "route-rules.json";
@@ -180,20 +180,28 @@ fn adapter_for(provider_id: &str) -> Result<Box<dyn providers::ProviderAdapter>>
 /// pending/complete metadata around native provisioning and send any returned
 /// `Secret` directly to `CredentialStore`; no secret is an IPC argument.
 #[tauri::command]
-pub fn add_account(provider_id: String, account_id: String) -> Result<()> {
+pub fn add_account(
+    provider_id: String,
+    account_id: String,
+    auth_kind: Option<AuthKind>,
+) -> Result<()> {
     let adapter = adapter_for(&provider_id)?;
-    let Some(plan) = adapter.managed_account_plan() else {
+    let Some(plan) = (match auth_kind {
+        Some(kind) => adapter.managed_account_plan_for(kind),
+        None => adapter.managed_account_plan(),
+    }) else {
         return adapter.add_account(&account_id);
     };
     let store = (plan.material == crate::model::StoredAccountMaterial::CredentialStore)
         .then(storage::default_store)
         .transpose()?;
-    providers::add_managed_account(
+    providers::add_managed_account_for(
         &stored_account_registry()?,
         adapter.as_ref(),
         &account_id,
         &account_id,
         store.as_deref(),
+        auth_kind,
     )
 }
 
@@ -219,18 +227,15 @@ pub fn activate_account(provider_id: String, account_id: String) -> Result<()> {
 #[tauri::command]
 pub fn delete_account(provider_id: String, account_id: String) -> Result<()> {
     let adapter = adapter_for(&provider_id)?;
-    let Some(plan) = adapter.managed_account_plan() else {
+    if adapter.managed_account_plan().is_none() {
         return adapter.delete_account(&account_id);
-    };
-    let store = (plan.material == crate::model::StoredAccountMaterial::CredentialStore)
+    }
+    let registry = stored_account_registry()?;
+    let account = registry.account(&provider_id, &account_id)?;
+    let store = (account.material == crate::model::StoredAccountMaterial::CredentialStore)
         .then(storage::default_store)
         .transpose()?;
-    providers::delete_managed_account(
-        &stored_account_registry()?,
-        adapter.as_ref(),
-        &account_id,
-        store.as_deref(),
-    )
+    providers::delete_managed_account(&registry, adapter.as_ref(), &account_id, store.as_deref())
 }
 
 /// Start a provider tool with the environment of its selected stored account.
@@ -600,17 +605,17 @@ mod tests {
     }
 
     #[test]
-    fn gemini_empty_is_listed_api_key_only() {
+    fn gemini_empty_is_listed() {
         let listing = listing_from_result("gemini-cli", Ok(Vec::new()));
         assert!(listing.accounts.is_empty());
-        assert_eq!(listing.outcome, AccountListOutcome::ListedApiKeyOnly);
+        assert_eq!(listing.outcome, AccountListOutcome::Listed);
     }
 
     #[test]
-    fn gemini_with_a_key_stays_listed_api_key_only() {
+    fn gemini_with_accounts_is_listed() {
         let listing = listing_from_result("gemini-cli", Ok(vec![sample_account("gemini-cli")]));
         assert_eq!(listing.accounts.len(), 1);
-        assert_eq!(listing.outcome, AccountListOutcome::ListedApiKeyOnly);
+        assert_eq!(listing.outcome, AccountListOutcome::Listed);
     }
 
     #[test]
@@ -982,8 +987,8 @@ mod tests {
 
     #[test]
     fn add_account_unknown_provider_is_unknown_provider() {
-        let error =
-            add_account("not-a-provider".into(), "acct-work".into()).expect_err("unknown provider");
+        let error = add_account("not-a-provider".into(), "acct-work".into(), None)
+            .expect_err("unknown provider");
         assert!(matches!(
             error,
             Error::UnknownProvider(ref id) if id == "not-a-provider"
@@ -1014,7 +1019,7 @@ mod tests {
     fn mutating_commands_on_an_unimplemented_adapter_are_not_implemented() {
         // Cursor's methods are stubs: they return NotImplemented without
         // touching the real home, keychain, or data directory.
-        let add = add_account("cursor".into(), "acct-work".into()).expect_err("cursor add");
+        let add = add_account("cursor".into(), "acct-work".into(), None).expect_err("cursor add");
         let activate =
             activate_account("cursor".into(), "acct-work".into()).expect_err("cursor activate");
         let delete =

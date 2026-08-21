@@ -97,13 +97,14 @@ Satisfies: `FR-1`, `FR-2` for two more providers.
 - Claude Code: surgical read-modify-write of the identity fields in
   `~/.claude.json`, preserving `projects`, `mcpServers`, and machine state,
   atomic across both files.
-- Gemini CLI: API-key accounts via `GEMINI_API_KEY`. OAuth stays unimplemented
-  until its credential path is `[verified-local]`.
+- Gemini CLI: API-key accounts via `GEMINI_API_KEY`. OAuth add is in-app
+  Google loopback writing an isolated `GEMINI_CLI_HOME`. File-swap of the
+  live `~/.gemini` home remains out of scope.
 
 M3 is partial. Gemini API-key account management is implemented through
-`CredentialStore` and non-secret launch selection. The selected key is resolved
-only at child spawn, conflicting auth environment variables are removed, and
-the full tested configuration tree remains unchanged.
+`CredentialStore` and non-secret launch selection. Gemini OAuth add writes
+only a managed home; launch sets `GEMINI_CLI_HOME` and
+`GOOGLE_GENAI_USE_GCA=true`. Neither path writes the live `~/.gemini` tree.
 
 Claude Code 2.1.212 research verified `[verified-local]` that the write identity
 is the top-level `claudeAiOauth` value in `.credentials.json` paired with the
