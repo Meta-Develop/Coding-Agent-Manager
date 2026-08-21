@@ -319,8 +319,8 @@ function listingBody({
       if (listing.accounts.length === 0) {
         return (
           <LimitationNote>
-            No stored Gemini API-key account is available. This adapter does not
-            support Google OAuth accounts.
+            No stored API-key account is available. This listing does not
+            include other auth kinds.
           </LimitationNote>
         )
       }
@@ -328,8 +328,7 @@ function listingBody({
         <>
           {table(listing.accounts)}
           <LimitationNote>
-            This adapter lists API-key accounts only. Google OAuth accounts are
-            not supported.
+            This adapter lists API-key accounts only.
           </LimitationNote>
         </>
       )

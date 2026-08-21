@@ -128,9 +128,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   frames, status chips, and button treatments. Labels, capability gates, and
   error distinctions are unchanged.
 - Accounts add flow is numbered and OAuth-first where the adapter can start
-  vendor sign-in (Codex CLI, Grok CLI). Gemini is titled Import API key and
-  states that Google OAuth is not offered. Claude Code says this application
-  cannot start its sign-in yet. Cursor still offers no add control (`NFR-8`).
+  sign-in (Codex CLI, Grok CLI, Gemini CLI). Gemini titles the primary path
+  Sign in to Gemini CLI and keeps Import API key as a secondary control.
+  Claude Code says this application cannot start its sign-in yet. Cursor still
+  offers no add control (`NFR-8`).
+- Gemini account listings use the ordinary `listed` outcome. The Accounts page
+  no longer describes Gemini as API-key-only or as lacking Google OAuth.
 - Provider sections on Accounts, Dashboard, and Providers use a left color
   rail, initial mark, and vendor chip keyed by provider id. Brand-adjacent
   hues only; no vendor marks.
@@ -147,9 +150,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 The credential stores and the backup machinery are implemented and exercised
 by the M1 exit-criteria suite. Codex CLI can add a stored account, switch
 the live `auth.json`, and delete a stored copy. That switch is a local
-file replacement; it is not proven against the vendor. Gemini API-key and Grok
-accounts can be selected for app-owned launches without changing the tool's
-default configuration. Claude Code and Cursor remain read-only. The relay and
+file replacement; it is not proven against the vendor. Gemini isolated-home
+OAuth, Gemini API-key, and Grok accounts can be selected for app-owned launches
+without changing each tool's default home. Live `~/.gemini` file-swap remains
+out of scope. Claude Code and Cursor remain read-only. The relay and
 router are implemented only to the boundaries recorded in `docs/ROADMAP.md`.
 
 [Unreleased]: https://github.com/Meta-Develop/Coding-Agent-Manager/commits/main

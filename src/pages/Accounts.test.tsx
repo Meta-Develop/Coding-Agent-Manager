@@ -517,7 +517,6 @@ describe('Accounts page', () => {
       ],
       listings: [
         listing('gemini-cli', {
-          outcome: { kind: 'listed-api-key-only' },
           accounts: [
             account({
               id: 'selected',
@@ -525,6 +524,12 @@ describe('Accounts page', () => {
               label: 'Selected',
               authKind: 'api-key',
               isSelectedForLaunch: true,
+            }),
+            account({
+              id: 'google-work',
+              providerId: 'gemini-cli',
+              label: 'Google work',
+              authKind: 'oauth',
             }),
             account({
               id: 'active',
@@ -548,7 +553,18 @@ describe('Accounts page', () => {
     renderApp()
 
     const selectedRow = await screen.findByRole('row', { name: /Selected/ })
+    const oauthRow = screen.getByRole('row', { name: /Google work/ })
     const activeRow = screen.getByRole('row', { name: /Active elsewhere/ })
+    expect(within(oauthRow).getByText('oauth')).toBeInTheDocument()
+    expect(
+      screen.queryByText(/does not support Google OAuth/i),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/Google OAuth accounts are not supported/i),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/lists API-key accounts only/i),
+    ).not.toBeInTheDocument()
     expect(
       within(selectedRow).getByText('Selected for app launch'),
     ).toBeInTheDocument()
@@ -585,13 +601,12 @@ describe('Accounts page', () => {
       providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
       listings: [
         listing('gemini-cli', {
-          outcome: { kind: 'listed-api-key-only' },
           accounts: [
             account({
               id: 'work',
               providerId: 'gemini-cli',
               label: 'Work',
-              authKind: 'api-key',
+              authKind: 'oauth',
             }),
           ],
         }),
@@ -638,13 +653,12 @@ describe('Accounts page', () => {
       providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
       listings: [
         listing('gemini-cli', {
-          outcome: { kind: 'listed-api-key-only' },
           accounts: [
             account({
               id: 'work',
               providerId: 'gemini-cli',
               label: 'Work',
-              authKind: 'api-key',
+              authKind: 'oauth',
               isSelectedForLaunch: true,
             }),
           ],
@@ -714,6 +728,12 @@ describe('Accounts page', () => {
     expect(
       await screen.findByRole('heading', { name: 'Sign in to Gemini CLI' }),
     ).toBeInTheDocument()
+    expect(
+      screen.getByText(/Nothing is configured for this provider/i),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText(/does not support Google OAuth/i),
+    ).not.toBeInTheDocument()
     expect(
       screen.getByText(/browser completes Google sign-in/i),
     ).toHaveTextContent(/never takes a password/i)
@@ -806,6 +826,40 @@ describe('Accounts page', () => {
       screen.getByRole('button', { name: 'Confirm forgetting Work' }),
     )
     expect(remove).toHaveBeenCalledWith('grok-cli', 'work')
+  })
+
+  it('warns that forgetting Gemini OAuth metadata retains the isolated home', async () => {
+    const user = userEvent.setup()
+    const remove = vi.fn(async () => undefined)
+    stubInvoke({
+      providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
+      listings: [
+        listing('gemini-cli', {
+          accounts: [
+            account({
+              id: 'work',
+              providerId: 'gemini-cli',
+              label: 'Work',
+              authKind: 'oauth',
+            }),
+          ],
+        }),
+      ],
+      remove,
+    })
+    renderApp()
+
+    await user.click(await screen.findByRole('button', { name: 'Forget Work' }))
+    expect(screen.getByText(/vendor-written isolated home/i)).toHaveTextContent(
+      /credential deliberately remain on disk/i,
+    )
+    expect(screen.getByText(/vendor-written isolated home/i)).toHaveTextContent(
+      /does not sign out Gemini CLI or destroy its credential/i,
+    )
+    await user.click(
+      screen.getByRole('button', { name: 'Confirm forgetting Work' }),
+    )
+    expect(remove).toHaveBeenCalledWith('gemini-cli', 'work')
   })
 })
 
