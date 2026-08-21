@@ -45,13 +45,50 @@ describe('Accounts page', () => {
 
     await screen.findByRole('heading', { name: 'Cursor' })
     expect(
-      screen.queryByRole('button', { name: /Add account/i }),
+      screen.queryByRole('button', {
+        name: /Add account|Sign in|Import API key/i,
+      }),
     ).not.toBeInTheDocument()
     expect(
       screen.queryByRole('button', { name: /Switch/i }),
     ).not.toBeInTheDocument()
     expect(
       screen.queryByRole('button', { name: /Delete/i }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('says Claude sign-in is unavailable and does not offer it', async () => {
+    stubInvoke({
+      providers: [
+        provider({
+          id: 'claude-code',
+          displayName: 'Claude Code',
+          vendor: 'Anthropic',
+          capabilities: [],
+        }),
+      ],
+      listings: [
+        listing('claude-code', {
+          accounts: [
+            account({
+              id: 'work',
+              providerId: 'claude-code',
+              label: 'Work',
+            }),
+          ],
+        }),
+      ],
+    })
+    renderApp()
+
+    await screen.findByRole('heading', { name: 'Claude Code' })
+    expect(
+      screen.getByText('This application cannot start Claude sign-in yet.'),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', {
+        name: /Sign in|Add account|Import API key/i,
+      }),
     ).not.toBeInTheDocument()
   })
 
@@ -380,22 +417,22 @@ describe('Accounts page', () => {
     })
     renderApp()
 
-    await screen.findByRole('textbox', { name: 'Account name' })
+    await screen.findByRole('textbox', { name: 'Nickname' })
     await user.type(
-      screen.getByRole('textbox', { name: 'Account name' }),
+      screen.getByRole('textbox', { name: 'Nickname' }),
       'unfinished',
     )
     await user.click(
-      screen.getByRole('button', { name: 'Add account to Codex CLI' }),
+      screen.getByRole('button', { name: 'Sign in to Codex CLI' }),
     )
 
     expect(
-      await screen.findByText(/Adding unfinished to Codex CLI/),
+      await screen.findByText(/Signing in to Codex CLI as unfinished/),
     ).toBeInTheDocument()
     expect(
-      screen.getByRole('button', { name: 'Add account to Codex CLI' }),
+      screen.getByRole('button', { name: 'Sign in to Codex CLI' }),
     ).toBeDisabled()
-    expect(screen.getByRole('textbox', { name: 'Account name' })).toBeDisabled()
+    expect(screen.getByRole('textbox', { name: 'Nickname' })).toBeDisabled()
     expect(
       screen.getByRole('button', { name: 'Switch to Work' }),
     ).toBeDisabled()
@@ -404,19 +441,19 @@ describe('Accounts page', () => {
 
     await user.click(screen.getByRole('link', { name: 'Dashboard' }))
     expect(
-      screen.getByText(/Adding unfinished to Codex CLI/),
+      screen.getByText(/Signing in to Codex CLI as unfinished/),
     ).toBeInTheDocument()
     expect(screen.queryByText(/cancell/i)).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('textbox', { name: 'Account name' }),
+      screen.queryByRole('textbox', { name: 'Nickname' }),
     ).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('link', { name: 'Accounts' }))
     expect(
-      await screen.findByRole('button', { name: 'Add account to Codex CLI' }),
+      await screen.findByRole('button', { name: 'Sign in to Codex CLI' }),
     ).toBeDisabled()
     expect(
-      screen.getByText(/Adding unfinished to Codex CLI/),
+      screen.getByText(/Signing in to Codex CLI as unfinished/),
     ).toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: 'Switch to Work' }),
@@ -435,9 +472,9 @@ describe('Accounts page', () => {
     })
     renderApp()
 
-    const name = await screen.findByRole('textbox', { name: 'Account name' })
+    const name = await screen.findByRole('textbox', { name: 'Nickname' })
     const submit = screen.getByRole('button', {
-      name: 'Add account to Codex CLI',
+      name: 'Sign in to Codex CLI',
     })
 
     await user.click(submit)
@@ -678,24 +715,25 @@ describe('Accounts page', () => {
     })
     renderApp()
 
-    const explanation = await screen.findByText(
-      /native parent process into CredentialStore/i,
+    expect(
+      await screen.findByRole('heading', { name: 'Import API key' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/Start or restart this application with/i),
+    ).toHaveTextContent(/GEMINI_API_KEY/)
+    expect(
+      screen.getByText(/Start or restart this application with/i),
+    ).toHaveTextContent(/different source key/)
+    const explanation = screen.getByText(
+      /parent-process key into CredentialStore/i,
     )
     expect(explanation).toHaveTextContent(
       /never typed into or returned to this webview/i,
     )
-    expect(explanation).toHaveTextContent(
-      /restart it again with a different source key/i,
-    )
-    expect(explanation).toHaveTextContent(
-      /Only Gemini API-key accounts are supported here, not Google OAuth accounts/i,
-    )
-    await user.type(
-      screen.getByRole('textbox', { name: 'Account name' }),
-      'work',
-    )
+    expect(explanation).toHaveTextContent(/Google OAuth is not offered here/i)
+    await user.type(screen.getByRole('textbox', { name: 'Nickname' }), 'work')
     await user.click(
-      screen.getByRole('button', { name: 'Add account to Gemini CLI' }),
+      screen.getByRole('button', { name: 'Import API key for Gemini CLI' }),
     )
 
     expect(add).toHaveBeenCalledWith('gemini-cli', 'work')
@@ -725,7 +763,10 @@ describe('Accounts page', () => {
     })
     renderApp()
 
-    await user.click(await screen.findByRole('button', { name: 'Forget Work' }))
+    expect(
+      await screen.findByRole('button', { name: 'Sign in to Grok CLI' }),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Forget Work' }))
     expect(screen.getByText(/vendor-written isolated home/i)).toHaveTextContent(
       /credential deliberately remain on disk/i,
     )

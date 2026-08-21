@@ -34,7 +34,7 @@ export default function Sidebar() {
                 [
                   'relative flex items-center gap-2.5 rounded-md py-2 pr-3 pl-3 text-sm',
                   isActive
-                    ? 'bg-surface font-medium text-ink shadow-control'
+                    ? 'bg-surface font-medium text-ink'
                     : 'text-ink-muted hover:bg-ink/5 hover:text-ink',
                 ].join(' ')
               }
