@@ -10,9 +10,9 @@ Cursor are read-only.
 
 > **Status: pre-alpha.** All five adapters are experimental. Codex CLI can add,
 > switch, and delete stored copies, but its copied-credential switch is not
-> proven against the vendor. Gemini API-key and Grok accounts can be added,
-> selected, launched, and forgotten through app-owned launch paths. Claude Code
-> and Cursor do not implement account mutation. See
+> proven against the vendor. Gemini Google OAuth, Gemini API-key, and Grok
+> accounts can be added, selected, launched, and forgotten through app-owned
+> launch paths. Claude Code and Cursor do not implement account mutation. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md) for what lands when, and
 > [`docs/PROVIDER_MATRIX.md`](docs/PROVIDER_MATRIX.md) for what is known
 > about each tool today.
@@ -25,7 +25,7 @@ Cursor are read-only.
 | Codex CLI   | OpenAI    | OAuth, API key   | Experimental   | `add-account`, `switch-account`, `delete-account`                | Replaces live `auth.json` behind a restorable backup. Vendor acceptance of a copied credential remains untested.                                                                                                    |
 | Cursor      | Anysphere | Unknown, API key | Experimental   | None                                                             | Lists the Cursor CLI identity through `cursor-agent status`. Credential storage and switching remain unknown.                                                                                                       |
 | Grok CLI    | xAI       | OAuth, API key   | Experimental   | `add-account`, `switch-account`, `delete-account`, `launch-tool` | Selects a retained managed `GROK_HOME` for an app-owned child and removes inherited `GROK_AUTH_PATH`. Forgetting removes manager metadata but retains the vendor home. This does not affect Grok started elsewhere. |
-| Gemini CLI  | Google    | OAuth, API key   | Experimental   | `add-account`, `switch-account`, `delete-account`, `launch-tool` | Resolves a stored API key only when spawning an app-owned child. The tested flow does not change Gemini configuration files. OAuth account listing and switching remain unimplemented.                              |
+| Gemini CLI  | Google    | OAuth, API key   | Experimental   | `add-account`, `switch-account`, `delete-account`, `launch-tool` | OAuth add writes an isolated `GEMINI_CLI_HOME` via in-app Google loopback. Launch sets that home and `GOOGLE_GENAI_USE_GCA=true`. API-key accounts inject `GEMINI_API_KEY` only into an app-owned child. Live `~/.gemini` file-swap remains out of scope. |
 
 Antigravity, Windsurf, GitHub Copilot, OpenCode, Aider, and Cline are planned
 behind the same adapter interface. Adding one does not require changing core
@@ -36,9 +36,11 @@ code — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Shipped today:
 
 - **Account operations.** Codex CLI can add, switch, and delete stored copies.
-  Gemini API-key and Grok accounts can be selected for app-owned launches.
-  Gemini selection injects `GEMINI_API_KEY` only into the child; Grok selection
-  sets child-only `GROK_HOME` and removes inherited `GROK_AUTH_PATH`.
+  Gemini Google OAuth, Gemini API-key, and Grok accounts can be selected for
+  app-owned launches. Gemini OAuth launch sets child-only `GEMINI_CLI_HOME` and
+  `GOOGLE_GENAI_USE_GCA=true`. Gemini API-key selection injects `GEMINI_API_KEY`
+  only into the child. Grok selection sets child-only `GROK_HOME` and removes
+  inherited `GROK_AUTH_PATH`.
 - **Listing.** Claude Code, Codex CLI, Cursor CLI, Grok CLI, and Gemini CLI can
   list their implemented account surfaces, with identities masked.
 - **Secure storage.** OS keychain first, encrypted file only as a
