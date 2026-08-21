@@ -13,8 +13,8 @@ export default function NotImplemented({
   children,
 }: NotImplementedProps) {
   return (
-    <div className="rounded-lg border border-dashed border-border-subtle p-6">
-      <p className="text-xs font-mono uppercase tracking-wide text-ink-muted">
+    <div className="notice notice-empty p-6">
+      <p className="text-xs font-mono tracking-wide text-ink-muted uppercase">
         Not implemented — {requirement}
       </p>
       <div className="mt-2 text-sm text-ink-muted">{children}</div>

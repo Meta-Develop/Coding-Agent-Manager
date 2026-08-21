@@ -5,11 +5,13 @@ import { AccountMutationProvider, MutationNotice } from '@/lib/accountMutation'
 export default function App() {
   return (
     <AccountMutationProvider>
-      <div className="flex h-full">
+      <div className="flex h-full bg-surface-sunken">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto p-8">
-          <MutationNotice />
-          <Outlet />
+        <main className="app-canvas flex-1 overflow-y-auto">
+          <div className="app-page">
+            <MutationNotice />
+            <Outlet />
+          </div>
         </main>
       </div>
     </AccountMutationProvider>

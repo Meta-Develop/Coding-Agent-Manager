@@ -113,6 +113,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- Desktop chrome: sidebar mark and nav affordance, page canvas, card and table
+  frames, status chips, and button treatments. Labels, capability gates, and
+  error distinctions are unchanged.
 - Declared minimum supported Rust version raised to 1.88, matching what the
   dependency tree already required.
 - Linux CI dependency list now names `libdbus-1-dev` explicitly rather than

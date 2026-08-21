@@ -3,10 +3,8 @@ import PageHeader from '@/components/PageHeader'
 import { relayStatus, startRelay, stopRelay } from '@/lib/tauri'
 import type { RelayStatus } from '@/types'
 
-const controlFocus =
-  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
-
-const buttonClass = `rounded-md border border-accent bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
+const primaryButton = 'btn btn-primary'
+const dangerButton = 'btn btn-danger'
 
 export default function Relay() {
   const [status, setStatus] = useState<RelayStatus | null>(null)
@@ -66,17 +64,14 @@ export default function Relay() {
         </p>
       )}
       {error !== null && (
-        <p
-          className="mb-4 rounded-md border border-border-subtle p-3 text-sm"
-          role="alert"
-        >
+        <p className="notice notice-danger mb-4" role="alert">
           Relay operation failed: {error}
         </p>
       )}
       {!loading && status === null && (
         <button
           type="button"
-          className={buttonClass}
+          className={primaryButton}
           onClick={() => {
             setError(null)
             setLoading(true)
@@ -88,7 +83,7 @@ export default function Relay() {
       )}
       {status !== null && (
         <section
-          className="rounded-lg border border-border-subtle p-6"
+          className="panel p-6"
           aria-labelledby="relay-status-heading"
           aria-busy={pending !== null}
         >
@@ -97,20 +92,26 @@ export default function Relay() {
               <h2 id="relay-status-heading" className="text-base font-semibold">
                 Listener status
               </h2>
-              <p className="mt-1 text-sm text-ink-muted" aria-live="polite">
-                {pending === null
-                  ? status.running
-                    ? 'Running'
-                    : 'Stopped'
-                  : pending === 'start'
-                    ? 'Starting…'
-                    : 'Stopping…'}
+              <p className="mt-2 text-sm" aria-live="polite">
+                {pending === null ? (
+                  <span
+                    className={
+                      status.running ? 'chip chip-ok' : 'chip chip-muted'
+                    }
+                  >
+                    {status.running ? 'Running' : 'Stopped'}
+                  </span>
+                ) : (
+                  <span className="text-ink-muted">
+                    {pending === 'start' ? 'Starting…' : 'Stopping…'}
+                  </span>
+                )}
               </p>
             </div>
             <button
               type="button"
               disabled={pending !== null}
-              className={buttonClass}
+              className={status.running ? dangerButton : primaryButton}
               onClick={() => {
                 void setRunning(!status.running)
               }}

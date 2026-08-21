@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import InitialMark from '@/components/InitialMark'
 import PageHeader from '@/components/PageHeader'
 import { listProviders } from '@/lib/tauri'
 import type { ProviderDescriptor } from '@/types'
@@ -24,35 +25,48 @@ export default function Providers() {
         description="Agent tools this application knows how to manage, and whether each was detected on this machine."
       />
       {error !== null && (
-        <p className="mb-4 rounded-md border border-border-subtle p-3 text-sm">
+        <p className="notice notice-danger mb-4">
           Failed to load providers: {error}
         </p>
       )}
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-sm">
-          <thead className="text-xs uppercase tracking-wide text-ink-muted">
+      <div className="table-frame">
+        <table className="data-table">
+          <thead>
             <tr>
-              <th className="py-2 pr-4">Provider</th>
-              <th className="py-2 pr-4">Vendor</th>
-              <th className="py-2 pr-4">Auth</th>
-              <th className="py-2 pr-4">Adapter</th>
-              <th className="py-2">Detected</th>
+              <th>Provider</th>
+              <th>Vendor</th>
+              <th>Auth</th>
+              <th>Adapter</th>
+              <th>Detected</th>
             </tr>
           </thead>
           <tbody>
             {providers.map((provider) => (
-              <tr key={provider.id} className="border-t border-border-subtle">
-                <td className="py-2 pr-4 font-medium">
-                  {provider.displayName}
+              <tr key={provider.id}>
+                <td className="font-medium">
+                  <span className="inline-flex items-center gap-2.5">
+                    <InitialMark name={provider.displayName} />
+                    {provider.displayName}
+                  </span>
                 </td>
-                <td className="py-2 pr-4 text-ink-muted">{provider.vendor}</td>
-                <td className="py-2 pr-4 text-ink-muted">
+                <td className="text-ink-muted">{provider.vendor}</td>
+                <td className="text-ink-muted">
                   {provider.authKinds.join(', ')}
                 </td>
-                <td className="py-2 pr-4 text-ink-muted">
-                  {provider.maturity}
+                <td className="text-ink-muted">{provider.maturity}</td>
+                <td>
+                  <span
+                    className={
+                      provider.installState === 'installed'
+                        ? 'chip chip-ok'
+                        : provider.installState === 'unknown'
+                          ? 'chip chip-warn'
+                          : 'chip chip-muted'
+                    }
+                  >
+                    {provider.installState}
+                  </span>
                 </td>
-                <td className="py-2 text-ink-muted">{provider.installState}</td>
               </tr>
             ))}
           </tbody>
