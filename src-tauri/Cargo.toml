@@ -49,6 +49,10 @@ chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 # Encodes the binary fields of the encrypted-file JSON envelope. Held at 0.22 to
 # match the version `keyring` already pulls in rather than adding a second copy.
 base64 = "0.22"
+# CSRF state for in-app Gemini Google OAuth. Already compiled in via
+# `chacha20poly1305`; this listing makes the crate usable without adding a
+# new dependency family.
+getrandom = "0.2"
 # Already in the tree via password-hash; this adds no new compiled code.
 subtle = "2"
 # RFC 3339 timestamps: backup file names (NFR-4) and `QuotaSnapshot.captured_at`.
@@ -58,9 +62,10 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 # Upstream client with platform-verified TLS and byte streaming. Redirects are
 # disabled in code so an authorization header cannot follow an upstream redirect.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls", "stream"] }
 # Listener lifecycle, graceful shutdown, and the application-wide relay mutex.
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+# `io-util` is the Gemini OAuth loopback read/write path.
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 # Adapts Reqwest response chunks into Axum bodies without buffering a stream.
 futures-util = { version = "0.3", default-features = false, features = ["async-await", "std"] }
 # Grok's vendor lock contract is a real non-blocking advisory file lock. Rust
