@@ -3,12 +3,9 @@ import PageHeader from '@/components/PageHeader'
 import { listProviders, listRouteRules, replaceRouteRules } from '@/lib/tauri'
 import type { ProviderDescriptor, RouteRule } from '@/types'
 
-const controlFocus =
-  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
-
-const inputClass = `mt-1 w-full rounded-md border border-border-subtle bg-surface px-3 py-1.5 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
-const buttonClass = `rounded-md border border-border-subtle px-3 py-1.5 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
-const primaryButtonClass = `rounded-md border border-accent bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`
+const inputClass = 'field mt-1'
+const buttonClass = 'btn'
+const primaryButtonClass = 'btn btn-primary'
 
 interface DraftRule {
   key: number
@@ -135,10 +132,7 @@ export default function RouterRules() {
 
       {!loading && loadError !== null && (
         <div className="space-y-3">
-          <p
-            className="rounded-md border border-border-subtle p-3 text-sm"
-            role="alert"
-          >
+          <p className="notice notice-danger" role="alert">
             Could not load routing rules: {loadError}
           </p>
           <button
@@ -159,7 +153,7 @@ export default function RouterRules() {
           }}
         >
           {rules.length === 0 && (
-            <p className="rounded-md border border-border-subtle p-3 text-sm">
+            <p className="notice notice-warn">
               No routing rules are configured. All requests will error until at
               least one rule is saved.
             </p>
@@ -170,10 +164,7 @@ export default function RouterRules() {
               const id = `route-rule-${rule.key}`
               return (
                 <li key={rule.key}>
-                  <fieldset
-                    disabled={saving}
-                    className="rounded-lg border border-border-subtle bg-surface-raised p-4"
-                  >
+                  <fieldset disabled={saving} className="panel p-4">
                     <legend className="px-1 text-sm font-semibold">
                       Rule {index + 1}
                     </legend>
@@ -361,10 +352,7 @@ export default function RouterRules() {
           </div>
 
           {saveError !== null && (
-            <p
-              className="mt-4 rounded-md border border-border-subtle p-3 text-sm"
-              role="alert"
-            >
+            <p className="notice notice-danger mt-4" role="alert">
               {saveError}
             </p>
           )}

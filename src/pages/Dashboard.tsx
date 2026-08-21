@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import InitialMark from '@/components/InitialMark'
 import PageHeader from '@/components/PageHeader'
 import { listAccounts, listProviders, listQuota } from '@/lib/tauri'
 import type {
@@ -95,10 +96,7 @@ export default function Dashboard() {
         </p>
       )}
       {summaryError !== null && (
-        <p
-          className="mb-4 rounded-md border border-border-subtle p-3 text-sm"
-          role="alert"
-        >
+        <p className="notice notice-danger mb-4" role="alert">
           Failed to load dashboard summary: {summaryError}
         </p>
       )}
@@ -106,65 +104,61 @@ export default function Dashboard() {
         <p className="text-sm text-ink-muted">No providers were returned.</p>
       )}
       {!summaryLoading && providers.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="text-xs uppercase tracking-wide text-ink-muted">
+        <div className="table-frame">
+          <table className="data-table">
+            <thead>
               <tr>
-                <th scope="col" className="py-2 pr-4">
-                  What is known
-                </th>
-                <th scope="col" className="py-2">
-                  On this machine
-                </th>
+                <th scope="col">What is known</th>
+                <th scope="col">On this machine</th>
               </tr>
             </thead>
             <tbody>
-              <tr className="border-t border-border-subtle">
-                <th scope="row" className="py-2 pr-4 text-left font-medium">
+              <tr>
+                <th scope="row" className="text-left font-medium">
                   Providers detected
                 </th>
-                <td className="py-2 text-ink-muted">
+                <td className="text-ink-muted">
                   {detected.length} of {providers.length}
                   {detected.length === 0
                     ? ' — none detected'
                     : ` — ${detected.map((provider) => provider.displayName).join(', ')}`}
                 </td>
               </tr>
-              <tr className="border-t border-border-subtle">
-                <th scope="row" className="py-2 pr-4 text-left font-medium">
+              <tr>
+                <th scope="row" className="text-left font-medium">
                   Visible accounts
                 </th>
-                <td className="py-2 text-ink-muted">{visibleCount}</td>
+                <td className="text-ink-muted">{visibleCount}</td>
               </tr>
-              <tr className="border-t border-border-subtle">
-                <th scope="row" className="py-2 pr-4 text-left font-medium">
+              <tr>
+                <th scope="row" className="text-left font-medium">
                   Adapters that cannot list accounts
                 </th>
-                <td className="py-2 text-ink-muted">
+                <td className="text-ink-muted">
                   {displayNames(cannotList, providers)}
                 </td>
               </tr>
-              <tr className="border-t border-border-subtle">
-                <th scope="row" className="py-2 pr-4 text-left font-medium">
+              <tr>
+                <th scope="row" className="text-left font-medium">
                   Lookups that failed
                 </th>
-                <td className="py-2 text-ink-muted">
+                <td className="text-ink-muted">
                   {displayNames(failed, providers)}
                 </td>
               </tr>
-              <tr className="border-t border-border-subtle">
-                <th scope="row" className="py-2 pr-4 text-left font-medium">
+              <tr>
+                <th scope="row" className="text-left font-medium">
                   Listings whose live login file is damaged
                 </th>
-                <td className="py-2 text-ink-muted">
+                <td className="text-ink-muted">
                   {displayNames(listedWithError, providers)}
                 </td>
               </tr>
-              <tr className="border-t border-border-subtle">
-                <th scope="row" className="py-2 pr-4 text-left font-medium">
+              <tr>
+                <th scope="row" className="text-left font-medium">
                   Listings that see only an API key
                 </th>
-                <td className="py-2 text-ink-muted">
+                <td className="text-ink-muted">
                   {displayNames(apiKeyOnly, providers)}
                 </td>
               </tr>
@@ -176,7 +170,10 @@ export default function Dashboard() {
       <section className="mt-8" aria-labelledby="quota-heading">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 id="quota-heading" className="text-lg font-semibold">
+            <h2
+              id="quota-heading"
+              className="text-lg font-semibold tracking-tight"
+            >
               Provider quota
             </h2>
             <p className="mt-1 text-sm text-ink-muted">
@@ -184,7 +181,7 @@ export default function Dashboard() {
             </p>
           </div>
           <div
-            className="flex rounded-md border border-border-subtle p-1"
+            className="flex rounded-md border border-border-subtle bg-surface p-1 shadow-control"
             role="group"
             aria-label="Quota view"
           >
@@ -251,8 +248,8 @@ function ViewButton({
       type="button"
       className={`rounded px-3 py-1.5 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
         selected
-          ? 'bg-surface-raised font-medium text-ink ring-1 ring-accent'
-          : 'text-ink-muted'
+          ? 'bg-surface-raised font-medium text-ink shadow-control ring-1 ring-accent'
+          : 'text-ink-muted hover:text-ink'
       }`}
       aria-pressed={selected}
       onClick={onClick}
@@ -279,25 +276,30 @@ function ProviderQuota({
 
   return (
     <article
-      className={`h-full rounded-lg border border-border-subtle bg-surface-raised p-4 ${
+      className={`panel h-full p-4 ${
         view === 'list'
           ? 'md:grid md:grid-cols-[minmax(12rem,1fr)_2fr] md:gap-6'
           : ''
       }`}
       aria-label={`${provider.displayName} quota`}
     >
-      <header>
-        <h3 className="font-semibold">{provider.displayName}</h3>
-        <dl className="mt-2 space-y-1 text-sm text-ink-muted">
-          <div className="flex gap-1">
-            <dt>Adapter maturity:</dt>
-            <dd>{provider.maturity}</dd>
-          </div>
-          <div className="flex gap-1">
-            <dt>Plan:</dt>
-            <dd>{planLabel}</dd>
-          </div>
-        </dl>
+      <header className="flex items-start gap-3">
+        <InitialMark name={provider.displayName} />
+        <div>
+          <h3 className="font-semibold tracking-tight">
+            {provider.displayName}
+          </h3>
+          <dl className="mt-2 space-y-1 text-sm text-ink-muted">
+            <div className="flex gap-1">
+              <dt>Adapter maturity:</dt>
+              <dd>{provider.maturity}</dd>
+            </div>
+            <div className="flex gap-1">
+              <dt>Plan:</dt>
+              <dd>{planLabel}</dd>
+            </div>
+          </dl>
+        </div>
       </header>
       <div className={view === 'list' ? 'mt-3 md:mt-0' : 'mt-3'}>
         <QuotaOutcome
@@ -349,7 +351,7 @@ function QuotaOutcome({
       {result.snapshots.map((snapshot, index) => (
         <li
           key={`${snapshot.accountId}-${snapshot.model ?? 'all'}-${snapshot.capturedAt}-${index}`}
-          className="rounded-md border border-border-subtle bg-surface p-3"
+          className="rounded-md border border-border-subtle bg-surface p-3 shadow-control"
         >
           <QuotaSnapshotDetails snapshot={snapshot} />
         </li>
@@ -360,10 +362,7 @@ function QuotaOutcome({
 
 function QuotaFailure({ message }: { message: string }) {
   return (
-    <p
-      className="rounded-md border border-border-subtle p-3 text-sm"
-      role="alert"
-    >
+    <p className="notice notice-danger" role="alert">
       {message}
     </p>
   )

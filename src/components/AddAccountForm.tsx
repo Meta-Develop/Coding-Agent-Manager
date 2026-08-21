@@ -4,9 +4,6 @@ import type { ProviderDescriptor } from '@/types'
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
 const ACCOUNT_ID_MAX_LENGTH = 128
 
-const controlFocus =
-  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
-
 /**
  * Adds a stored account for one adapter. The name is the account id, so the
  * allowed characters are on screen before submit. Provider-specific copy
@@ -55,7 +52,7 @@ export default function AddAccountForm({
 
   return (
     <form
-      className="mt-4 rounded-lg border border-border-subtle bg-surface-raised p-4"
+      className="panel mt-4 p-4"
       onSubmit={(event) => {
         void handleSubmit(event)
       }}
@@ -82,14 +79,10 @@ export default function AddAccountForm({
                 setValidation(null)
               }
             }}
-            className={`mt-1 w-full rounded-md border border-border-subtle bg-surface px-3 py-1.5 text-sm text-ink disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`}
+            className="field mt-1"
           />
         </div>
-        <button
-          type="submit"
-          disabled={disabled}
-          className={`rounded-md border border-accent bg-accent/15 px-3 py-1.5 text-sm font-medium text-accent disabled:cursor-not-allowed disabled:opacity-50 ${controlFocus}`}
-        >
+        <button type="submit" disabled={disabled} className="btn btn-primary">
           Add account to {provider.displayName}
         </button>
       </div>
@@ -103,7 +96,7 @@ export default function AddAccountForm({
         {addExplanation(provider)}
       </p>
       {validation !== null && (
-        <p id={errorId} className="mt-2 text-sm" role="alert">
+        <p id={errorId} className="mt-2 text-sm text-danger" role="alert">
           {validation}
         </p>
       )}
