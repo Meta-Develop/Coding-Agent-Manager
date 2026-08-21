@@ -70,7 +70,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `CredentialStore`, selected through non-secret metadata, resolved only at
   child spawn, and injected as `GEMINI_API_KEY` into that app-owned child.
   Add, select, launch, and delete leave the Gemini configuration tree
-  unchanged. OAuth account management remains unimplemented.
+  unchanged.
+- Gemini CLI in-app Google OAuth add. The flow is a loopback
+  authorization-code exchange adapted from Antigravity Manager, using
+  Gemini CLI's published installed-app client. Tokens are written only to
+  an isolated `GEMINI_CLI_HOME` as `oauth_creds.json` plus
+  `google_accounts.json`. Launch sets that home and
+  `GOOGLE_GENAI_USE_GCA=true`. Forgetting an OAuth account retains the
+  home. The live `~/.gemini` tree is not written.
 - Grok CLI managed accounts. Each vendor-written home stays under the
   application data directory; selection starts an app-owned child with
   `GROK_HOME` set to that home and inherited `GROK_AUTH_PATH` removed. The
@@ -113,6 +120,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- Relicensed from GPL-3.0-or-later to CC-BY-NC-SA-4.0 so this project can
+  share a licence with `lbjlaq/Antigravity-Manager`. The grant is
+  non-commercial and share-alike. Copies already received under
+  GPL-3.0-or-later are not revoked.
 - Desktop chrome: sidebar mark and nav affordance, page canvas, card and table
   frames, status chips, and button treatments. Labels, capability gates, and
   error distinctions are unchanged.

@@ -193,7 +193,14 @@ What remains `[unknown]` for an OAuth switch, and must stay `[unknown]`:
   an already-running process, ADC / `GOOGLE_APPLICATION_CREDENTIALS`).
 - Whether a refresh rewrite racing a switch can lose one side's write.
 
-Do not implement an OAuth write/switch path against this note.
+Do not implement a live-home OAuth file-swap against this note.
+
+This application’s OAuth add is a different path: in-app Google loopback
+that writes an isolated `GEMINI_CLI_HOME` with the Gemini CLI file pair
+(`oauth_creds.json` plus `google_accounts.json`). That isolated-home write
+follows the `[verified-source]` `GEMINI_CLI_HOME` relocation and the
+Credentials / `UserAccounts` shapes above. It is not a signed-in host
+observation. File-swap of the live `~/.gemini` tree remains out of scope.
 
 ## 6. Quota and usage signals
 
@@ -230,10 +237,12 @@ Still unsafe to **write**:
   client cache.
 - Shipping an OAuth switch as the first Gemini adapter path.
 
-The API-key path remains the only write-safe switch for this provider. An
-adapter may now add a **read-only** OAuth listing/detection surface on top of
-that. It must not grow a write/switch surface until a signed-in host
-observation, or equivalent, closes the `[unknown]` items in §5.
+The API-key path remains the only write-safe switch of an already-configured
+live home. Isolated-home OAuth add is implemented in this application and
+does not replace files under the live `~/.gemini` tree. A live-home OAuth
+file-swap must still wait until a signed-in host observation, or equivalent,
+closes the `[unknown]` items in §5. No `[verified-local]` signed-in claim is
+made here.
 
 ## 9. Open questions
 
