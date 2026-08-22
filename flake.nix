@@ -69,7 +69,7 @@
             iconDir = ./src-tauri/icons;
             # Content hash of the Linux release binary from `npm run tauri:build`.
             # Refresh with `nix hash file --sri` after rebuilding that binary.
-            unwrappedSha256 = "sha256-EKPCQm8Ut/cJlvkdwsYXwTH2nKoGPNQs23UiGnFF1Qo=";
+            unwrappedSha256 = "sha256-O6hC4KPLXxcIw8g1f4QEgZhEv2PTrm6e/Eb4LVnsfLc=";
           };
           default = coding-agent-manager;
         };
