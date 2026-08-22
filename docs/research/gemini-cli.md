@@ -193,7 +193,10 @@ What remains `[unknown]` for an OAuth switch, and must stay `[unknown]`:
   an already-running process, ADC / `GOOGLE_APPLICATION_CREDENTIALS`).
 - Whether a refresh rewrite racing a switch can lose one side's write.
 
-Do not implement an OAuth write/switch path against this note.
+Do not implement an OAuth file-write or file-swap switch against this note.
+Isolating a managed `GEMINI_CLI_HOME` and letting the vendor process write
+`oauth_creds.json` is a launch-environment path, not a manager write of those
+files.
 
 ## 6. Quota and usage signals
 
@@ -228,12 +231,14 @@ Still unsafe to **write**:
   real code path.
 - Assuming a running CLI will notice a file swap. There is an in-process
   client cache.
-- Shipping an OAuth switch as the first Gemini adapter path.
+- Shipping a same-home OAuth file-swap as a switch.
 
-The API-key path remains the only write-safe switch for this provider. An
-adapter may now add a **read-only** OAuth listing/detection surface on top of
-that. It must not grow a write/switch surface until a signed-in host
-observation, or equivalent, closes the `[unknown]` items in §5.
+The API-key path remains the only manager-written switch for this provider.
+An adapter may isolate a managed `GEMINI_CLI_HOME` and start the vendor
+`gemini` process so that process writes `oauth_creds.json`. That is not a
+manager write or swap of OAuth files. A same-home OAuth file-write/swap
+surface stays forbidden until a signed-in host observation, or equivalent,
+closes the `[unknown]` items in §5.
 
 ## 9. Open questions
 

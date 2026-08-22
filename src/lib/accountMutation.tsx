@@ -14,12 +14,13 @@ import {
   deleteAccount,
   launchProvider,
 } from '@/lib/tauri'
-import type { ProviderDescriptor } from '@/types'
+import type { AuthKind, ProviderDescriptor } from '@/types'
 
 export interface PendingConfirmation {
   providerId: string
   accountId: string
   kind: PendingKind
+  authKind?: AuthKind
 }
 
 export interface Notice {
@@ -40,6 +41,7 @@ interface AccountMutationValue {
     provider: ProviderDescriptor,
     accountId: string,
     accountName: string,
+    authKind?: AuthKind,
   ) => Promise<boolean>
   runLaunch: (
     provider: ProviderDescriptor,
@@ -80,6 +82,7 @@ export function AccountMutationProvider({ children }: { children: ReactNode }) {
       provider: ProviderDescriptor,
       accountId: string,
       accountName: string,
+      authKind?: AuthKind,
     ): Promise<boolean> => {
       if (busyRef.current) {
         return false
@@ -89,12 +92,18 @@ export function AccountMutationProvider({ children }: { children: ReactNode }) {
       setBusy(true)
       setNotice({
         tone: 'progress',
-        message: progressMessage(kind, provider, accountId, accountName),
+        message: progressMessage(
+          kind,
+          provider,
+          accountId,
+          accountName,
+          authKind,
+        ),
       })
       try {
         try {
           if (kind === 'add') {
-            await addAccount(provider.id, accountId)
+            await addAccount(provider.id, accountId, authKind)
           } else if (kind === 'switch') {
             await activateAccount(provider.id, accountId)
           } else {
@@ -103,14 +112,20 @@ export function AccountMutationProvider({ children }: { children: ReactNode }) {
         } catch (cause: unknown) {
           setNotice({
             tone: 'failure',
-            message: `${failureLead(kind, provider, accountId, accountName)} ${commandErrorMessage(cause)}`,
+            message: `${failureLead(kind, provider, accountId, accountName, authKind)} ${commandErrorMessage(cause)}`,
           })
           return false
         }
         setListingEpoch((epoch) => epoch + 1)
         setNotice({
           tone: 'success',
-          message: successMessage(kind, provider, accountId, accountName),
+          message: successMessage(
+            kind,
+            provider,
+            accountId,
+            accountName,
+            authKind,
+          ),
         })
         return true
       } finally {
@@ -231,10 +246,14 @@ function progressMessage(
   provider: ProviderDescriptor,
   accountId: string,
   accountName: string,
+  authKind?: AuthKind,
 ): string {
   if (kind === 'add') {
-    if (provider.id === 'gemini-cli') {
+    if (provider.id === 'gemini-cli' && authKind === 'api-key') {
       return `Importing API key for ${accountId} from the native parent process into CredentialStore…`
+    }
+    if (provider.id === 'gemini-cli') {
+      return `Signing in to ${provider.displayName} as ${accountId}. Finish Google sign-in in the Gemini window, then close Gemini CLI so add can finish. Leaving this page does not cancel it.`
     }
     if (provider.id === 'grok-cli') {
       return `Signing in to ${provider.displayName} as ${accountId}. The vendor window or terminal completes OAuth and will write a retained isolated home; leaving this page does not cancel it.`
@@ -247,7 +266,7 @@ function progressMessage(
     }
     return `Switching ${provider.displayName} to ${accountName}…`
   }
-  if (provider.id === 'grok-cli') {
+  if (retainsVendorHome(provider, authKind)) {
     return `Forgetting ${accountName} from this application's metadata. The vendor-written home and credential will remain on disk.`
   }
   if (provider.id === 'gemini-cli') {
@@ -261,9 +280,10 @@ function successMessage(
   provider: ProviderDescriptor,
   accountId: string,
   accountName: string,
+  authKind?: AuthKind,
 ): string {
   if (kind === 'add') {
-    if (provider.id === 'gemini-cli') {
+    if (provider.id === 'gemini-cli' && authKind === 'api-key') {
       return `Imported API key for ${accountId}.`
     }
     return `Signed in to ${provider.displayName} as ${accountId}.`
@@ -274,7 +294,7 @@ function successMessage(
     }
     return `Switched ${provider.displayName} to ${accountName}.`
   }
-  if (provider.id === 'grok-cli') {
+  if (retainsVendorHome(provider, authKind)) {
     return `Forgot ${accountName} from this application's metadata. Its vendor-written home and credential remain on disk.`
   }
   if (provider.id === 'gemini-cli') {
@@ -288,9 +308,10 @@ function failureLead(
   provider: ProviderDescriptor,
   accountId: string,
   accountName: string,
+  authKind?: AuthKind,
 ): string {
   if (kind === 'add') {
-    if (provider.id === 'gemini-cli') {
+    if (provider.id === 'gemini-cli' && authKind === 'api-key') {
       return `Could not import API key for ${accountId}:`
     }
     return `Could not sign in to ${provider.displayName} as ${accountId}:`
@@ -301,13 +322,23 @@ function failureLead(
     }
     return `Could not switch ${provider.displayName} to ${accountName}:`
   }
-  if (provider.id === 'grok-cli') {
+  if (retainsVendorHome(provider, authKind)) {
     return `Could not forget ${accountName} from this application's metadata:`
   }
   if (provider.id === 'gemini-cli') {
     return `Could not delete ${accountName} from CredentialStore:`
   }
   return `Could not delete ${accountName}:`
+}
+
+export function retainsVendorHome(
+  provider: ProviderDescriptor,
+  authKind?: AuthKind,
+): boolean {
+  return (
+    provider.id === 'grok-cli' ||
+    (provider.id === 'gemini-cli' && authKind === 'oauth')
+  )
 }
 
 function commandErrorMessage(cause: unknown): string {

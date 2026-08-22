@@ -701,20 +701,26 @@ describe('Accounts page', () => {
     expect(alert).not.toHaveTextContent(/switched|active session changed/i)
   })
 
-  it('explains native Gemini key import and sends no key through IPC', async () => {
+  it('starts Gemini OAuth vendor sign-in and still offers native key import', async () => {
     const user = userEvent.setup()
     const add = vi.fn(async () => undefined)
     stubInvoke({
       providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
       listings: [
         listing('gemini-cli', {
-          outcome: { kind: 'listed-api-key-only' },
+          outcome: { kind: 'listed' },
         }),
       ],
       add,
     })
     renderApp()
 
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in to Gemini CLI' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/Finish Google sign-in in the Gemini window/i),
+    ).toHaveTextContent(/does not write Gemini OAuth files itself/i)
     expect(
       await screen.findByRole('heading', { name: 'Import API key' }),
     ).toBeInTheDocument()
@@ -730,8 +736,36 @@ describe('Accounts page', () => {
     expect(explanation).toHaveTextContent(
       /never typed into or returned to this webview/i,
     )
-    expect(explanation).toHaveTextContent(/Google OAuth is not offered here/i)
+    expect(explanation).not.toHaveTextContent(
+      /Google OAuth is not offered here/i,
+    )
     await user.type(screen.getByRole('textbox', { name: 'Nickname' }), 'work')
+    await user.click(
+      screen.getByRole('button', { name: 'Sign in to Gemini CLI' }),
+    )
+
+    expect(add).toHaveBeenCalledWith('gemini-cli', 'work')
+    expect(callsOf('add_account').at(-1)?.[1]).toEqual({
+      providerId: 'gemini-cli',
+      accountId: 'work',
+      authKind: 'oauth',
+    })
+  })
+
+  it('imports a Gemini API key without sending the key through IPC', async () => {
+    const user = userEvent.setup()
+    const add = vi.fn(async () => undefined)
+    stubInvoke({
+      providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
+      listings: [listing('gemini-cli')],
+      add,
+    })
+    renderApp()
+
+    await user.type(
+      await screen.findByRole('textbox', { name: 'Nickname' }),
+      'work',
+    )
     await user.click(
       screen.getByRole('button', { name: 'Import API key for Gemini CLI' }),
     )
@@ -740,6 +774,7 @@ describe('Accounts page', () => {
     expect(callsOf('add_account').at(-1)?.[1]).toEqual({
       providerId: 'gemini-cli',
       accountId: 'work',
+      authKind: 'api-key',
     })
   })
 
@@ -777,6 +812,40 @@ describe('Accounts page', () => {
       screen.getByRole('button', { name: 'Confirm forgetting Work' }),
     )
     expect(remove).toHaveBeenCalledWith('grok-cli', 'work')
+  })
+
+  it('warns that forgetting Gemini OAuth metadata retains the vendor home', async () => {
+    const user = userEvent.setup()
+    const remove = vi.fn(async () => undefined)
+    stubInvoke({
+      providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
+      listings: [
+        listing('gemini-cli', {
+          accounts: [
+            account({
+              id: 'work',
+              providerId: 'gemini-cli',
+              label: 'Work',
+              authKind: 'oauth',
+            }),
+          ],
+        }),
+      ],
+      remove,
+    })
+    renderApp()
+
+    await user.click(await screen.findByRole('button', { name: 'Forget Work' }))
+    expect(screen.getByText(/vendor-written isolated home/i)).toHaveTextContent(
+      /credential deliberately remain on disk/i,
+    )
+    expect(screen.getByText(/vendor-written isolated home/i)).toHaveTextContent(
+      /does not sign out Gemini CLI or destroy its credential/i,
+    )
+    await user.click(
+      screen.getByRole('button', { name: 'Confirm forgetting Work' }),
+    )
+    expect(remove).toHaveBeenCalledWith('gemini-cli', 'work')
   })
 })
 

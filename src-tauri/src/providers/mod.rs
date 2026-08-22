@@ -174,6 +174,15 @@ pub trait ProviderAdapter: Send + Sync {
         None
     }
 
+    /// Plan for one requested auth kind, if this adapter manages that kind.
+    ///
+    /// The default keeps a single-plan adapter working: it returns the
+    /// adapter's only plan when the kind matches, otherwise `None`.
+    fn managed_account_plan_for(&self, auth_kind: AuthKind) -> Option<ManagedAccountPlan> {
+        self.managed_account_plan()
+            .filter(|plan| plan.auth_kind == auth_kind)
+    }
+
     /// Provision material for a core-owned pending account.
     ///
     /// A credential-backed provider returns a `Secret` acquired entirely in
@@ -367,9 +376,29 @@ pub fn add_managed_account(
     label: &str,
     credential_store: Option<&dyn CredentialStore>,
 ) -> Result<()> {
-    let plan = adapter
-        .managed_account_plan()
-        .ok_or(Error::NotImplemented("add_managed_account"))?;
+    add_managed_account_for(registry, adapter, account_id, label, credential_store, None)
+}
+
+/// Same as [`add_managed_account`], with an explicit auth kind.
+///
+/// `None` uses [`ProviderAdapter::managed_account_plan`]. A supplied kind uses
+/// [`ProviderAdapter::managed_account_plan_for`].
+pub fn add_managed_account_for(
+    registry: &StoredAccountRegistry,
+    adapter: &dyn ProviderAdapter,
+    account_id: &str,
+    label: &str,
+    credential_store: Option<&dyn CredentialStore>,
+    auth_kind: Option<AuthKind>,
+) -> Result<()> {
+    let plan = match auth_kind {
+        Some(kind) => adapter
+            .managed_account_plan_for(kind)
+            .ok_or(Error::NotImplemented("add_managed_account"))?,
+        None => adapter
+            .managed_account_plan()
+            .ok_or(Error::NotImplemented("add_managed_account"))?,
+    };
     let account = registry.begin_add(
         adapter.id(),
         account_id,
@@ -411,10 +440,10 @@ pub fn delete_managed_account(
     account_id: &str,
     credential_store: Option<&dyn CredentialStore>,
 ) -> Result<()> {
-    let plan = adapter
-        .managed_account_plan()
-        .ok_or(Error::NotImplemented("delete_managed_account"))?;
     let account = registry.account(adapter.id(), account_id)?;
+    let plan = adapter
+        .managed_account_plan_for(account.auth_kind)
+        .ok_or(Error::NotImplemented("delete_managed_account"))?;
     if account.material != plan.material || account.auth_kind != plan.auth_kind {
         return Err(metadata_write_error(
             adapter.id(),

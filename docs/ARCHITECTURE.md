@@ -149,9 +149,11 @@ Codex stored homes are governed by
 [ADR 0008](adr/0008-vendor-written-auth-json-for-stored-codex-accounts.md).
 Grok homes are retained under the narrower
 [ADR 0009](adr/0009-launch-environment-account-selection.md) exception: the
-application never copies, rewrites, backs up, or deletes them. Gemini material
-is held by `CredentialStore`; its metadata contains no secret reference or
-value. Tests inject temporary roots so fixtures never use live application
+application never copies, rewrites, backs up, or deletes them. Gemini OAuth
+homes follow the same retained-home exception; the vendor writes
+`oauth_creds.json` under the isolated `GEMINI_CLI_HOME`. Gemini API-key
+material is held by `CredentialStore`; metadata contains no secret reference
+or value. Tests inject temporary roots so fixtures never use live application
 data.
 
 ### Adding a legacy Codex stored account
@@ -248,6 +250,11 @@ provider/account binding and the adapter's `LaunchSpec`.
   resolved only at child spawn. The child receives `GEMINI_API_KEY`; conflicting
   auth selectors are removed. Add, select, launch preparation, and deletion do
   not modify the Gemini configuration tree.
+- Gemini OAuth provisioning starts vendor login in a derived managed home.
+  Selection sets child-only `GEMINI_CLI_HOME` and `GOOGLE_GENAI_USE_GCA` and
+  removes competing auth environment variables. Forgetting removes metadata
+  but retains all vendor-written files. This application does not write or
+  swap `oauth_creds.json`.
 - Grok provisioning runs vendor login in a derived managed home. Selection sets
   child-only `GROK_HOME` and removes inherited `GROK_AUTH_PATH`. Lock and session
   checks fail closed before provisioning, selection, launch, or forgetting.
@@ -340,15 +347,16 @@ targets, not integration with provider-selected managed accounts.
 
 ## 7. State and persistence
 
-| Data                               | Location                                 | Class                                                                                                                                                           |
-| ---------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Secrets this application stores    | OS credential service, or encrypted file | Secret. Never exported. Gemini API keys use this path.                                                                                                          |
-| Stored-account metadata            | `{data_dir}/stored-accounts.json`        | Durable, non-secret, versioned. Contains pending, complete, and deleting lifecycle state, but no credential reference or value.                                 |
-| Stored Codex `auth.json` copies    | `{data_dir}/accounts/codex-cli/{id}/`    | Secret on disk. Vendor-written and not encrypted here. See [ADR 0008](adr/0008-vendor-written-auth-json-for-stored-codex-accounts.md).                          |
-| Retained Grok vendor homes         | `{data_dir}/accounts/grok-cli/{id}/`     | Secret on disk. Vendor-written, retained, and never copied, backed up, rewritten, or deleted. See [ADR 0009](adr/0009-launch-environment-account-selection.md). |
-| Route rules                        | `{data_dir}/route-rules.json`            | Durable, non-secret, versioned ordered document.                                                                                                                |
-| Quota snapshots                    | Not persisted                            | Collected on demand. No refresh scheduler or quota cache exists.                                                                                                |
-| Backups of live tool configuration | Application data directory, timestamped  | Durable until pruned by retention. The implemented Codex switch retains its backup.                                                                             |
+| Data                               | Location                                 | Class                                                                                                                                                                                               |
+| ---------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Secrets this application stores    | OS credential service, or encrypted file | Secret. Never exported. Gemini API keys use this path.                                                                                                                                              |
+| Stored-account metadata            | `{data_dir}/stored-accounts.json`        | Durable, non-secret, versioned. Contains pending, complete, and deleting lifecycle state, but no credential reference or value.                                                                     |
+| Stored Codex `auth.json` copies    | `{data_dir}/accounts/codex-cli/{id}/`    | Secret on disk. Vendor-written and not encrypted here. See [ADR 0008](adr/0008-vendor-written-auth-json-for-stored-codex-accounts.md).                                                              |
+| Retained Grok vendor homes         | `{data_dir}/accounts/grok-cli/{id}/`     | Secret on disk. Vendor-written, retained, and never copied, backed up, rewritten, or deleted. See [ADR 0009](adr/0009-launch-environment-account-selection.md).                                     |
+| Retained Gemini OAuth homes        | `{data_dir}/accounts/gemini-cli/{id}/`   | Secret on disk. Vendor-written, retained, and never copied, backed up, rewritten, or deleted. Selected through `GEMINI_CLI_HOME`. See [ADR 0009](adr/0009-launch-environment-account-selection.md). |
+| Route rules                        | `{data_dir}/route-rules.json`            | Durable, non-secret, versioned ordered document.                                                                                                                                                    |
+| Quota snapshots                    | Not persisted                            | Collected on demand. No refresh scheduler or quota cache exists.                                                                                                                                    |
+| Backups of live tool configuration | Application data directory, timestamped  | Durable until pruned by retention. The implemented Codex switch retains its backup.                                                                                                                 |
 
 There is no generic migration engine. The encrypted credential envelope refuses
 a newer schema version. Stored-account metadata and route rules require the
