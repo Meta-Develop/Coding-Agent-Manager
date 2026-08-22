@@ -126,6 +126,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- Dashboard home shows one row or card per account with display name, provider,
+  sourced remaining quota, window, and reset time together. Accounts without a
+  snapshot still appear with an explicit no-signal state and no invented
+  percentage (`FR-5`, `NFR-8`).
 - Relicensed from GPL-3.0-or-later to CC-BY-NC-SA-4.0 so this project can
   share a licence with `lbjlaq/Antigravity-Manager`. The grant is
   non-commercial and share-alike. Copies already received under
