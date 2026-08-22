@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Dashboard from '@/pages/Dashboard'
 import { listAccounts, listProviders, listQuota } from '@/lib/tauri'
 import type {
+  Account,
   ProviderAccountList,
   ProviderDescriptor,
   ProviderQuotaList,
@@ -20,10 +21,10 @@ describe('Dashboard quota visibility', () => {
     vi.clearAllMocks()
     vi.mocked(listProviders).mockResolvedValue(PROVIDERS)
     vi.mocked(listAccounts).mockResolvedValue(
-      PROVIDERS.map(({ id }) => listing(id)),
+      PROVIDERS.map((item) => listing(item)),
     )
     vi.mocked(listQuota).mockResolvedValue(
-      PROVIDERS.map(({ id }) => noSignal(id)),
+      PROVIDERS.map((item) => noSignal(item.id)),
     )
   })
 
@@ -31,17 +32,20 @@ describe('Dashboard quota visibility', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders an explicit no-signal state for every registered provider', async () => {
+  it('keeps the account name visible next to an honest no-signal state', async () => {
     render(<Dashboard />)
 
     for (const provider of PROVIDERS) {
+      const name = accountLabel(provider)
       const card = await screen.findByRole('article', {
-        name: `${provider.displayName} quota`,
+        name: `${name} quota`,
       })
+      expect(within(card).getByText(name)).toBeVisible()
+      expect(within(card).getByText(provider.displayName)).toBeVisible()
       expect(within(card).getByText('No quota signal available')).toBeVisible()
-      expect(within(card).getByText(provider.maturity)).toBeVisible()
-      expect(within(card).getByText('Unavailable')).toBeVisible()
       expect(within(card).queryByText(/% remaining/)).not.toBeInTheDocument()
+      expect(within(card).queryByRole('progressbar')).not.toBeInTheDocument()
+      expect(within(card).getByText('—')).toBeVisible()
     }
   })
 
@@ -69,17 +73,21 @@ describe('Dashboard quota visibility', () => {
       'true',
     )
     expect(screen.getAllByRole('article')).toHaveLength(PROVIDERS.length)
+    expect(
+      screen.getByRole('article', {
+        name: `${accountLabel(CLAUDE_PROVIDER)} quota`,
+      }),
+    ).toBeVisible()
   })
 
-  it('shows sourced remaining quota, plan, window, reset, source, and capture age', async () => {
+  it('shows name, remaining quota, and reset on the same sourced card', async () => {
     const provider = CLAUDE_PROVIDER
     const capturedAt = '2026-08-20T10:00:00Z'
     const resetsAt = '2026-08-20T15:00:00Z'
-    vi.spyOn(Date, 'now').mockReturnValue(
-      new Date('2026-08-20T12:00:00Z').getTime(),
-    )
     vi.mocked(listProviders).mockResolvedValue([provider])
-    vi.mocked(listAccounts).mockResolvedValue([listing(provider.id)])
+    vi.mocked(listAccounts).mockResolvedValue([
+      listing(provider, [account(provider, { id: 'work', label: 'Work' })]),
+    ])
     vi.mocked(listQuota).mockResolvedValue([
       {
         providerId: provider.id,
@@ -102,16 +110,17 @@ describe('Dashboard quota visibility', () => {
     render(<Dashboard />)
 
     const card = await screen.findByRole('article', {
-      name: `${provider.displayName} quota`,
+      name: 'Work quota',
     })
+    expect(within(card).getByText('Work')).toBeVisible()
+    expect(within(card).getByText(provider.displayName)).toBeVisible()
     expect(within(card).getByText('75% remaining')).toBeVisible()
+    expect(within(card).getByRole('progressbar')).toHaveAttribute(
+      'aria-valuenow',
+      '75',
+    )
     expect(within(card).getByText('Pro')).toBeVisible()
     expect(within(card).getByText('5 hours')).toBeVisible()
-    expect(within(card).getByText('local-file')).toBeVisible()
-    expect(within(card).getByText('2 hours ago')).toHaveAttribute(
-      'dateTime',
-      capturedAt,
-    )
     expect(within(card).getByTitle(resetsAt)).toHaveAttribute(
       'dateTime',
       resetsAt,
@@ -123,8 +132,8 @@ describe('Dashboard quota visibility', () => {
     const emptyProvider = CODEX_PROVIDER
     vi.mocked(listProviders).mockResolvedValue([failedProvider, emptyProvider])
     vi.mocked(listAccounts).mockResolvedValue([
-      listing(failedProvider.id),
-      listing(emptyProvider.id),
+      listing(failedProvider),
+      listing(emptyProvider),
     ])
     vi.mocked(listQuota).mockResolvedValue([
       {
@@ -146,8 +155,11 @@ describe('Dashboard quota visibility', () => {
     render(<Dashboard />)
 
     const failedCard = await screen.findByRole('article', {
-      name: `${failedProvider.displayName} quota`,
+      name: `${accountLabel(failedProvider)} quota`,
     })
+    expect(
+      within(failedCard).getByText(accountLabel(failedProvider)),
+    ).toBeVisible()
     expect(within(failedCard).getByRole('alert')).toHaveTextContent(
       'Quota collection failed: Quota cache is unreadable',
     )
@@ -156,24 +168,29 @@ describe('Dashboard quota visibility', () => {
     ).not.toBeInTheDocument()
 
     const emptyCard = screen.getByRole('article', {
-      name: `${emptyProvider.displayName} quota`,
+      name: `${accountLabel(emptyProvider)} quota`,
     })
+    expect(
+      within(emptyCard).getByText(accountLabel(emptyProvider)),
+    ).toBeVisible()
     expect(
       within(emptyCard).getByText('No quota signal available'),
     ).toBeVisible()
     expect(within(emptyCard).queryByRole('alert')).not.toBeInTheDocument()
+    expect(within(emptyCard).getByText('—')).toBeVisible()
   })
 
   it('treats a missing provider result as an error', async () => {
     vi.mocked(listProviders).mockResolvedValue([CLAUDE_PROVIDER])
-    vi.mocked(listAccounts).mockResolvedValue([listing(CLAUDE_PROVIDER.id)])
+    vi.mocked(listAccounts).mockResolvedValue([listing(CLAUDE_PROVIDER)])
     vi.mocked(listQuota).mockResolvedValue([])
 
     render(<Dashboard />)
 
     const card = await screen.findByRole('article', {
-      name: `${CLAUDE_PROVIDER.displayName} quota`,
+      name: `${accountLabel(CLAUDE_PROVIDER)} quota`,
     })
+    expect(within(card).getByText(accountLabel(CLAUDE_PROVIDER))).toBeVisible()
     expect(within(card).getByRole('alert')).toHaveTextContent(
       'Quota result missing for this provider.',
     )
@@ -182,23 +199,19 @@ describe('Dashboard quota visibility', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('keeps the provider summary when quota loading rejects', async () => {
+  it('keeps the account row when quota loading rejects', async () => {
     vi.mocked(listProviders).mockResolvedValue([CLAUDE_PROVIDER])
-    vi.mocked(listAccounts).mockResolvedValue([listing(CLAUDE_PROVIDER.id)])
+    vi.mocked(listAccounts).mockResolvedValue([listing(CLAUDE_PROVIDER)])
     vi.mocked(listQuota).mockImplementation(() => {
       throw new Error('quota command unavailable')
     })
 
     render(<Dashboard />)
 
-    expect(
-      await screen.findByRole('row', {
-        name: /Providers detected 1 of 1 — Claude Code/,
-      }),
-    ).toBeVisible()
-    const card = screen.getByRole('article', {
-      name: `${CLAUDE_PROVIDER.displayName} quota`,
+    const card = await screen.findByRole('article', {
+      name: `${accountLabel(CLAUDE_PROVIDER)} quota`,
     })
+    expect(within(card).getByText(accountLabel(CLAUDE_PROVIDER))).toBeVisible()
     expect(within(card).getByRole('alert')).toHaveTextContent(
       'Quota collection failed: Error: quota command unavailable',
     )
@@ -231,10 +244,36 @@ function provider(
   }
 }
 
-function listing(providerId: string): ProviderAccountList {
+function accountLabel(item: ProviderDescriptor): string {
+  return `${item.displayName} work`
+}
+
+function account(
+  item: ProviderDescriptor,
+  partial: Partial<Account> = {},
+): Account {
   return {
-    providerId,
-    accounts: [],
+    id: `${item.id}-work`,
+    providerId: item.id,
+    label: accountLabel(item),
+    maskedIdentity: 'a***@example.com',
+    authKind: 'oauth',
+    isActive: false,
+    isSelectedForLaunch: false,
+    isStored: true,
+    isIncomplete: false,
+    expiresAt: null,
+    ...partial,
+  }
+}
+
+function listing(
+  item: ProviderDescriptor,
+  accounts: Account[] = [account(item)],
+): ProviderAccountList {
+  return {
+    providerId: item.id,
+    accounts,
     outcome: { kind: 'listed' },
   }
 }
