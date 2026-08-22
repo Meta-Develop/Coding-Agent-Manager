@@ -195,12 +195,22 @@ What remains `[unknown]` for an OAuth switch, and must stay `[unknown]`:
 
 Do not implement a live-home OAuth file-swap against this note.
 
-This application’s OAuth add is a different path: in-app Google loopback
-that writes an isolated `GEMINI_CLI_HOME` with the Gemini CLI file pair
-(`oauth_creds.json` plus `google_accounts.json`). That isolated-home write
-follows the `[verified-source]` `GEMINI_CLI_HOME` relocation and the
-Credentials / `UserAccounts` shapes above. It is not a signed-in host
-observation. File-swap of the live `~/.gemini` tree remains out of scope.
+Isolated-home OAuth add has already shipped. In-app Google loopback writes
+an isolated `GEMINI_CLI_HOME` with the Gemini CLI file pair
+(`oauth_creds.json` plus `google_accounts.json`) and a managed
+`settings.json` whose `security.auth.selectedType` is `oauth-personal`.
+Those writes follow the `[verified-source]` `GEMINI_CLI_HOME` relocation
+and the Credentials, `UserAccounts`, and settings shapes above. They do
+not write live `~/.gemini/settings.json`. This is not a signed-in host
+observation.
+
+This application also lists a live `~/.gemini` OAuth row when
+`oauth_creds.json` exists. That listing is read-only: it detects the
+file, masks `google_accounts.json` `active`, and treats `old` as
+history. The live row omits `expires_at` by design: the creds check
+is presence-only and does not parse token fields. It does not write
+the live tree. File-swap of the live `~/.gemini` tree remains
+`[unknown]` and out of scope.
 
 ## 6. Quota and usage signals
 
@@ -215,8 +225,10 @@ integration shapes for the same vendor.
 
 ## 8. Risks and constraints
 
-Reading and detecting OAuth state is now in bounds. Writing an OAuth switch is
-not. `docs/research/README.md` and `.agents/docs/PROJECT_RULES.md` allow a
+Reading and detecting OAuth state is now in bounds, including a
+read-only live listing of `~/.gemini` when `oauth_creds.json` is
+present. Writing an OAuth switch of that live tree is not.
+`docs/research/README.md` and `.agents/docs/PROJECT_RULES.md` allow a
 read/detect path to rest on `[verified-source]` or `[verified-docs]`. They
 forbid a write path from resting on `[inferred]` or `[unknown]`.
 
@@ -238,11 +250,11 @@ Still unsafe to **write**:
 - Shipping an OAuth switch as the first Gemini adapter path.
 
 The API-key path remains the only write-safe switch of an already-configured
-live home. Isolated-home OAuth add is implemented in this application and
-does not replace files under the live `~/.gemini` tree. A live-home OAuth
-file-swap must still wait until a signed-in host observation, or equivalent,
-closes the `[unknown]` items in §5. No `[verified-local]` signed-in claim is
-made here.
+live home. Isolated-home OAuth add has already shipped and still does not
+replace files under the live `~/.gemini` tree. Live listing is read-only.
+A live-home OAuth file-swap must still wait until a signed-in host
+observation, or equivalent, closes the `[unknown]` items in §5. No
+`[verified-local]` signed-in claim is made here.
 
 ## 9. Open questions
 

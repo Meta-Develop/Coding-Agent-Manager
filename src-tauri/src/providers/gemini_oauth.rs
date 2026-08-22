@@ -6,6 +6,8 @@
 //! `packages/core/src/code_assist/oauth2.ts` (Apache-2.0), not Antigravity's
 //! client. Tokens and codes are never logged.
 
+use std::fs;
+use std::io;
 use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -37,6 +40,7 @@ const SCOPES: &str = "https://www.googleapis.com/auth/cloud-platform https://www
 
 const SUCCESS_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><html><body>Sign-in complete. You can close this tab and return to Coding Agent Manager.</body></html>";
 const FAIL_RESPONSE: &[u8] = b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><html><body>Sign-in failed. Return to Coding Agent Manager and try again.</body></html>";
+const OAUTH_SELECTED_TYPE: &str = "oauth-personal";
 
 /// Gemini CLI `oauth_creds.json` shape (`google-auth-library` Credentials).
 #[derive(Serialize)]
@@ -97,7 +101,78 @@ pub(crate) fn write_oauth_documents(
             .map_err(|_| config_write("google_accounts.json is not JSON"))?;
         fsx::write_atomic(&dir.join("google_accounts.json"), &accounts_bytes)?;
     }
+    write_managed_oauth_settings(home)
+}
+
+/// Write `security.auth.selectedType: oauth-personal` into the isolated
+/// managed home only. The key path is `[verified-source]`. Existing
+/// sibling settings keys are kept.
+pub(crate) fn write_managed_oauth_settings(home: &Path) -> Result<()> {
+    let dir = home.join(".gemini");
+    fsx::create_dir_all_private(&dir)?;
+    let path = dir.join("settings.json");
+    let mut root = match fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(Value::Object(map)) => map,
+            Ok(_) => return Err(config_write("managed settings.json is not an object")),
+            Err(_) => return Err(config_write("managed settings.json is not JSON")),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Map::new(),
+        Err(error) => {
+            return Err(config_write(format!(
+                "managed settings.json cannot be inspected ({})",
+                error.kind()
+            )))
+        }
+    };
+    overlay_oauth_selected_type(&mut root)?;
+    let bytes = serde_json::to_vec_pretty(&Value::Object(root))
+        .map_err(|_| config_write("managed settings.json is not JSON"))?;
+    fsx::write_atomic(&path, &bytes)
+}
+
+fn overlay_oauth_selected_type(root: &mut Map<String, Value>) -> Result<()> {
+    let security = root
+        .entry("security")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let security = security
+        .as_object_mut()
+        .ok_or_else(|| config_write("managed settings.json has unsupported security settings"))?;
+    let auth = security
+        .entry("auth")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let auth = auth.as_object_mut().ok_or_else(|| {
+        config_write("managed settings.json has unsupported security.auth settings")
+    })?;
+    auth.insert(
+        "selectedType".to_string(),
+        Value::String(OAUTH_SELECTED_TYPE.to_string()),
+    );
     Ok(())
+}
+
+/// Read only `expiry_date` milliseconds. Other keys are discarded and never
+/// returned or logged.
+pub(crate) fn expiry_rfc3339_from_oauth_creds(path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ExpiryOnly {
+        expiry_date: Option<i64>,
+    }
+
+    let raw = fs::read_to_string(path).ok()?;
+    let parsed: ExpiryOnly = serde_json::from_str(&raw).ok()?;
+    rfc3339_from_epoch_millis(parsed.expiry_date?)
+}
+
+fn rfc3339_from_epoch_millis(millis: i64) -> Option<String> {
+    let seconds = millis.div_euclid(1_000);
+    let nanos = u32::try_from(millis.rem_euclid(1_000).saturating_mul(1_000_000)).ok()?;
+    time::OffsetDateTime::from_unix_timestamp(seconds)
+        .ok()?
+        .replace_nanosecond(nanos)
+        .ok()?
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
 }
 
 #[cfg(test)]
@@ -532,6 +607,14 @@ mod tests {
             .get("active")
             .and_then(|value| value.as_str())
             .is_some());
+        let settings: serde_json::Value = serde_json::from_slice(
+            &fs::read(home.join(".gemini/settings.json")).expect("settings"),
+        )
+        .expect("settings json");
+        assert_eq!(
+            settings["security"]["auth"]["selectedType"],
+            "oauth-personal"
+        );
         #[cfg(unix)]
         {
             let mode = fs::metadata(home.join(".gemini/oauth_creds.json"))
@@ -541,6 +624,48 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         assert_no_secret("oauth module debug", &format!("{:?}", dir.path()));
+    }
+
+    #[test]
+    fn managed_settings_overlay_keeps_sibling_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("managed");
+        let settings = home.join(".gemini/settings.json");
+        fsx::create_dir_all_private(settings.parent().expect("dir")).expect("dir");
+        fs::write(
+            &settings,
+            r#"{"security":{"auth":{"useExternal":false}},"ui":{"theme":"Default"}}"#,
+        )
+        .expect("seed");
+        write_managed_oauth_settings(&home).expect("overlay");
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings).expect("read")).expect("json");
+        assert_eq!(value["security"]["auth"]["selectedType"], "oauth-personal");
+        assert_eq!(value["security"]["auth"]["useExternal"], false);
+        assert_eq!(value["ui"]["theme"], "Default");
+    }
+
+    #[test]
+    fn expiry_rfc3339_reads_only_the_millisecond_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("oauth_creds.json");
+        fs::write(
+            &path,
+            r#"{"access_token":"FAKE-gemini-oauth-access-0001","expiry_date":1700000000000}"#,
+        )
+        .expect("creds");
+        assert_eq!(
+            expiry_rfc3339_from_oauth_creds(&path).as_deref(),
+            Some("2023-11-14T22:13:20Z")
+        );
+        fs::write(&path, r#"{"expiry_date":null}"#).expect("null");
+        assert_eq!(expiry_rfc3339_from_oauth_creds(&path), None);
+        fs::write(&path, r#"{"expiry_date":"not-a-number"}"#).expect("bad");
+        assert_eq!(expiry_rfc3339_from_oauth_creds(&path), None);
+        assert_eq!(
+            rfc3339_from_epoch_millis(1_700_000_000_000).as_deref(),
+            Some("2023-11-14T22:13:20Z")
+        );
     }
 
     #[test]

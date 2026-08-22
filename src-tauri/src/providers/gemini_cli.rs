@@ -7,8 +7,11 @@
 //!
 //! OAuth add writes an isolated `GEMINI_CLI_HOME` with Gemini CLI's
 //! `oauth_creds.json` / `google_accounts.json` pair via in-app Google
-//! loopback. This adapter never writes the live `~/.gemini` tree. The
-//! effective auth-mode gate follows the pinned first-party source in
+//! loopback, and writes `settings.json` `security.auth.selectedType:
+//! oauth-personal` into that isolated home only. This adapter never
+//! writes the live `~/.gemini` tree. Listing may include a read-only
+//! on-disk OAuth row when live `oauth_creds.json` exists. The effective
+//! auth-mode gate follows the pinned first-party source in
 //! `docs/research/gemini-cli.md` `[verified-source]`.
 
 use std::fmt;
@@ -37,6 +40,7 @@ const GCA_ENV: &str = "GOOGLE_GENAI_USE_GCA";
 const API_KEY_AUTH_TYPE: &str = "gemini-api-key";
 const OAUTH_AUTH_TYPE: &str = "oauth-personal";
 const AMBIENT_API_KEY_ACCOUNT_ID: &str = "gemini-cli-ambient-api-key";
+const LIVE_OAUTH_ACCOUNT_ID: &str = "gemini-cli-on-disk";
 
 const REMOVED_AUTH_ENVIRONMENT: &[&str] = &[
     "GOOGLE_GENAI_USE_GCA",
@@ -287,6 +291,7 @@ impl GeminiCliAdapter {
         match fs::symlink_metadata(oauth_creds_path(&home)) {
             Ok(_) => {
                 validate_oauth_creds(&home)?;
+                super::gemini_oauth::write_managed_oauth_settings(&home)?;
                 return Ok(());
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -298,7 +303,8 @@ impl GeminiCliAdapter {
             }
         }
         self.complete_oauth(&home)?;
-        validate_oauth_creds(&home)
+        validate_oauth_creds(&home)?;
+        super::gemini_oauth::write_managed_oauth_settings(&home)
     }
 
     fn masked_oauth_identity(&self, account: &StoredAccountMetadata) -> Option<String> {
@@ -353,7 +359,42 @@ impl GeminiCliAdapter {
                 "stored account metadata does not match a Gemini lifecycle",
             ));
         }
+        if account.id == LIVE_OAUTH_ACCOUNT_ID || account.id == AMBIENT_API_KEY_ACCOUNT_ID {
+            return Err(config_read(
+                "account id is reserved for an on-disk Gemini identity",
+            ));
+        }
         Ok(())
+    }
+
+    fn live_oauth_row(&self) -> Option<Account> {
+        let cwd = self.cwd().ok()?;
+        let home = self.resolved_home_for(&cwd).ok()?;
+        if !live_oauth_creds_present(&home) {
+            return None;
+        }
+        Some(Account {
+            id: LIVE_OAUTH_ACCOUNT_ID.to_string(),
+            provider_id: PROVIDER_ID.to_string(),
+            label: "On-disk Gemini OAuth (not manager-stored)".to_string(),
+            masked_identity: masked_active_email(&google_accounts_path(&home)),
+            auth_kind: AuthKind::OAuth,
+            // Presence of the live token file is not a claim about an
+            // independently launched Gemini process or a file-swap switch.
+            is_active: false,
+            is_selected_for_launch: false,
+            is_stored: false,
+            is_incomplete: false,
+            expires_at: None,
+        })
+    }
+
+    fn stored_oauth_expiry(&self, account: &StoredAccountMetadata) -> Option<String> {
+        if account.auth_kind != AuthKind::OAuth {
+            return None;
+        }
+        let home = self.managed_home(account).ok()?;
+        super::gemini_oauth::expiry_rfc3339_from_oauth_creds(&oauth_creds_path(&home))
     }
 }
 
@@ -442,16 +483,22 @@ impl ProviderAdapter for GeminiCliAdapter {
                     is_selected_for_launch: complete && stored.is_selected,
                     is_stored: true,
                     is_incomplete: !complete,
-                    expires_at: None,
+                    expires_at: self.stored_oauth_expiry(stored),
                 }
             })
             .collect();
+        if let Some(live) = self.live_oauth_row() {
+            if !accounts.iter().any(|account| account.id == live.id) {
+                accounts.push(live);
+            }
+        }
         accounts.sort_by(|left, right| left.id.cmp(&right.id));
 
         // Keep the old ambient observation only when it cannot be mistaken
-        // for one of the manager's durable accounts. No key fragment crosses
-        // IPC, and `is_active` stays false because effective cwd/settings are
-        // not established by mere environment presence.
+        // for one of the manager's durable accounts or a live on-disk OAuth
+        // row. No key fragment crosses IPC, and `is_active` stays false
+        // because effective cwd/settings are not established by mere
+        // environment presence.
         if accounts.is_empty() && self.api_key_is_present() {
             accounts.push(Account {
                 id: AMBIENT_API_KEY_ACCOUNT_ID.to_string(),
@@ -924,6 +971,14 @@ fn ensure_private_managed_home(data_dir: &Path, home: &Path) -> Result<()> {
 }
 
 /// Presence and type only. Token bytes are never read into errors or logs.
+fn live_oauth_creds_present(home: &Path) -> bool {
+    match fs::symlink_metadata(oauth_creds_path(home)) {
+        Ok(metadata) => !metadata.file_type().is_symlink() && metadata.is_file(),
+        Err(_) => false,
+    }
+}
+
+/// Presence and type only. Token bytes are never read into errors or logs.
 fn validate_oauth_creds(home: &Path) -> Result<()> {
     let path = oauth_creds_path(home);
     let metadata = fs::symlink_metadata(&path).map_err(|error| {
@@ -1185,6 +1240,10 @@ mod tests {
         assert!(accounts[0].is_stored);
         assert!(!accounts[0].is_incomplete);
         assert_eq!(accounts[0].masked_identity, None);
+        assert_eq!(
+            accounts[0].expires_at.as_deref(),
+            Some("2023-11-14T22:13:20Z")
+        );
         let surfaces = format!(
             "{accounts:?} {}",
             serde_json::to_string(&accounts).expect("json")
@@ -1274,6 +1333,14 @@ mod tests {
         adapter
             .provision_stored_account(&oauth_metadata("work", StoredAccountState::Pending))
             .expect("recovery");
+        let settings: Value = serde_json::from_slice(
+            &fs::read(home.join(".gemini/settings.json")).expect("recovered settings"),
+        )
+        .expect("settings json");
+        assert_eq!(
+            settings["security"]["auth"]["selectedType"],
+            "oauth-personal"
+        );
     }
 
     #[test]
@@ -1288,11 +1355,144 @@ mod tests {
             .provision_stored_account(&oauth_metadata("work", StoredAccountState::Pending))
             .expect("provision");
         assert!(oauth_creds_path(&home).is_file());
-        assert!(!home.join(".gemini/settings.json").exists());
+        let managed_settings: Value = serde_json::from_slice(
+            &fs::read(home.join(".gemini/settings.json")).expect("managed settings"),
+        )
+        .expect("settings json");
+        assert_eq!(
+            managed_settings["security"]["auth"]["selectedType"],
+            "oauth-personal"
+        );
         let live = adapter
             .resolved_home_for(&adapter.cwd().expect("cwd"))
             .expect("live home");
         assert!(!oauth_creds_path(&live).exists());
+        let live_settings = fs::read_to_string(live.join(".gemini/settings.json")).expect("live");
+        assert!(live_settings.contains("gemini-api-key"));
+        assert!(!live_settings.contains("oauth-personal"));
+    }
+
+    fn write_live_oauth_files(home: &Path, email: Option<&str>) {
+        let dir = home.join(".gemini");
+        fs::create_dir_all(&dir).expect("live gemini dir");
+        fs::write(
+            dir.join("oauth_creds.json"),
+            br#"{"access_token":"FAKE-live-oauth-access-0001","expiry_date":1700000000000}"#,
+        )
+        .expect("live creds");
+        if let Some(email) = email {
+            let document = serde_json::json!({
+                "active": email,
+                "old": ["FAKE-old-user-0002@example.invalid"]
+            });
+            fs::write(
+                dir.join("google_accounts.json"),
+                serde_json::to_vec_pretty(&document).expect("accounts json"),
+            )
+            .expect("live accounts");
+        }
+    }
+
+    fn live_tree(home: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let root = home.join(".gemini");
+        let mut entries: Vec<_> = fs::read_dir(&root)
+            .expect("live dir")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_file() {
+                files.push((
+                    path.strip_prefix(home).expect("relative").to_path_buf(),
+                    fs::read(&path).expect("read"),
+                ));
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn live_oauth_lists_one_on_disk_row_and_does_not_write() {
+        let (_dir, adapter) = context(None);
+        let live = adapter
+            .resolved_home_for(&adapter.cwd().expect("cwd"))
+            .expect("live home");
+        write_live_oauth_files(&live, Some("FAKE-user-0001@example.invalid"));
+        let before = live_tree(&live);
+        let accounts = adapter.list_accounts().expect("list");
+        assert_eq!(after_list_ids(&accounts), vec![LIVE_OAUTH_ACCOUNT_ID]);
+        assert_eq!(accounts[0].auth_kind, AuthKind::OAuth);
+        assert!(!accounts[0].is_stored);
+        assert!(!accounts[0].is_selected_for_launch);
+        assert!(!accounts[0].is_active);
+        assert!(!accounts[0].is_incomplete);
+        assert_eq!(accounts[0].expires_at, None);
+        let masked = accounts[0]
+            .masked_identity
+            .as_deref()
+            .expect("masked identity");
+        assert!(masked.contains("***@"), "identity was not masked: {masked}");
+        assert!(!masked.contains("FAKE-user-0001"));
+        let surfaces = format!(
+            "{accounts:?} {}",
+            serde_json::to_string(&accounts).expect("json")
+        );
+        assert_no_fake("live oauth list", &surfaces);
+        assert!(!surfaces.contains("FAKE-old-user-0002@example.invalid"));
+        assert_eq!(before, live_tree(&live));
+    }
+
+    #[test]
+    fn live_oauth_and_stored_oauth_list_as_separate_rows() {
+        let (_dir, adapter) = oauth_adapter(write_oauth_files_with_email);
+        add_managed_account_for(
+            &registry_for(&adapter),
+            &adapter,
+            "work",
+            "Work",
+            None,
+            Some(AuthKind::OAuth),
+        )
+        .expect("oauth add");
+        let live = adapter
+            .resolved_home_for(&adapter.cwd().expect("cwd"))
+            .expect("live home");
+        write_live_oauth_files(&live, Some("FAKE-live-0003@example.invalid"));
+        let accounts = adapter.list_accounts().expect("list");
+        assert_eq!(
+            after_list_ids(&accounts),
+            vec![LIVE_OAUTH_ACCOUNT_ID, "work"]
+        );
+        let live_row = accounts
+            .iter()
+            .find(|account| account.id == LIVE_OAUTH_ACCOUNT_ID)
+            .expect("live");
+        let stored = accounts
+            .iter()
+            .find(|account| account.id == "work")
+            .expect("stored");
+        assert!(!live_row.is_stored);
+        assert!(stored.is_stored);
+        assert_eq!(stored.expires_at.as_deref(), Some("2023-11-14T22:13:20Z"));
+        let surfaces = format!(
+            "{accounts:?} {}",
+            serde_json::to_string(&accounts).expect("json")
+        );
+        assert_no_fake("live plus stored", &surfaces);
+    }
+
+    #[test]
+    fn reserved_on_disk_ids_cannot_be_stored() {
+        let (_dir, adapter) = oauth_adapter(write_oauth_files);
+        let mut live_id = oauth_metadata(LIVE_OAUTH_ACCOUNT_ID, StoredAccountState::Pending);
+        assert!(adapter.provision_stored_account(&live_id).is_err());
+        live_id.id = AMBIENT_API_KEY_ACCOUNT_ID.to_string();
+        assert!(adapter.provision_stored_account(&live_id).is_err());
+    }
+
+    fn after_list_ids(accounts: &[Account]) -> Vec<&str> {
+        accounts.iter().map(|account| account.id.as_str()).collect()
     }
 
     #[test]
