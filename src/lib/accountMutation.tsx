@@ -92,7 +92,13 @@ export function AccountMutationProvider({ children }: { children: ReactNode }) {
       setBusy(true)
       setNotice({
         tone: 'progress',
-        message: progressMessage(kind, provider, accountId, accountName, authKind),
+        message: progressMessage(
+          kind,
+          provider,
+          accountId,
+          accountName,
+          authKind,
+        ),
       })
       try {
         try {
@@ -113,7 +119,13 @@ export function AccountMutationProvider({ children }: { children: ReactNode }) {
         setListingEpoch((epoch) => epoch + 1)
         setNotice({
           tone: 'success',
-          message: successMessage(kind, provider, accountId, accountName, authKind),
+          message: successMessage(
+            kind,
+            provider,
+            accountId,
+            accountName,
+            authKind,
+          ),
         })
         return true
       } finally {
