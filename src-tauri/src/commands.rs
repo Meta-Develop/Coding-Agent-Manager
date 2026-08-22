@@ -184,8 +184,23 @@ fn adapter_for(provider_id: &str) -> Result<Box<dyn providers::ProviderAdapter>>
 /// Legacy adapters own their transaction. Core-managed adapters persist
 /// pending/complete metadata around native provisioning and send any returned
 /// `Secret` directly to `CredentialStore`; no secret is an IPC argument.
+///
+/// Vendor login blocks until the CLI or loopback finishes. Offload that wait
+/// so this invoke does not occupy the command thread for the whole login.
 #[tauri::command]
-pub fn add_account(
+pub async fn add_account(
+    provider_id: String,
+    account_id: String,
+    auth_kind: Option<AuthKind>,
+) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        add_account_blocking(provider_id, account_id, auth_kind)
+    })
+    .await
+    .expect("add_account worker")
+}
+
+fn add_account_blocking(
     provider_id: String,
     account_id: String,
     auth_kind: Option<AuthKind>,
@@ -992,8 +1007,12 @@ mod tests {
 
     #[test]
     fn add_account_unknown_provider_is_unknown_provider() {
-        let error = add_account("not-a-provider".into(), "acct-work".into(), None)
-            .expect_err("unknown provider");
+        let error = tauri::async_runtime::block_on(add_account(
+            "not-a-provider".into(),
+            "acct-work".into(),
+            None,
+        ))
+        .expect_err("unknown provider");
         assert!(matches!(
             error,
             Error::UnknownProvider(ref id) if id == "not-a-provider"
@@ -1024,7 +1043,9 @@ mod tests {
     fn mutating_commands_on_an_unimplemented_adapter_are_not_implemented() {
         // Cursor's methods are stubs: they return NotImplemented without
         // touching the real home, keychain, or data directory.
-        let add = add_account("cursor".into(), "acct-work".into(), None).expect_err("cursor add");
+        let add =
+            tauri::async_runtime::block_on(add_account("cursor".into(), "acct-work".into(), None))
+                .expect_err("cursor add");
         let activate =
             activate_account("cursor".into(), "acct-work".into()).expect_err("cursor activate");
         let delete =

@@ -150,6 +150,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Linux CI dependency list now names `libdbus-1-dev` explicitly rather than
   relying on it arriving transitively.
 
+### Fixed
+
+- `add_account` no longer occupies the Tauri command thread for the duration of
+  vendor login; the invoke still waits for the same login result.
+
 ### Notes
 
 The credential stores and the backup machinery are implemented and exercised
