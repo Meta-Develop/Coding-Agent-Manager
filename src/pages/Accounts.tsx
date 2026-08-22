@@ -241,11 +241,6 @@ function ProviderAccounts({
             : "The tool's current identity is not stored here, so this application cannot switch back to it."}
         </p>
       )}
-      {provider.id === 'claude-code' && !canAdd && (
-        <p className="mt-3 text-sm text-ink-muted">
-          This application cannot start Claude sign-in yet.
-        </p>
-      )}
       {canAdd && (
         <AddAccountForm provider={provider} disabled={busy} onAdd={onAdd} />
       )}
@@ -641,9 +636,8 @@ function AccountTable({
                             ) : (
                               <>
                                 Switch {provider.displayName} to{' '}
-                                {accountDisplayName(account)}? This replaces the
-                                credential file in the tool&apos;s own home,
-                                behind a restorable backup.{' '}
+                                {accountDisplayName(account)}? This rewrites the
+                                live tool config, behind a restorable backup.{' '}
                                 {provider.displayName} must not be running.
                               </>
                             )

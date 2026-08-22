@@ -7,9 +7,10 @@
 
 Some managed tools choose credentials from the environment of the process that
 starts them rather than from an account pointer in a shared config file. Gemini
-CLI accepts a Developer API key through `GEMINI_API_KEY`. Grok CLI resolves its
-home through `GROK_HOME`, so a vendor-written home can remain in place while an
-application-launched process selects it.
+CLI accepts a Developer API key through `GEMINI_API_KEY`. Isolated Google OAuth
+uses `GEMINI_CLI_HOME`. Grok CLI resolves its home through `GROK_HOME`, so a
+vendor-written home can remain in place while an application-launched process
+selects it.
 
 Treating these providers as file-switch adapters would create unnecessary
 credential copies and race vendor refreshes. Mutating this application's
@@ -111,6 +112,13 @@ Activation and launch do not write Gemini config. The Gemini config tree must
 be byte-identical before and after activation. An already-set child environment
 value is not replaced by Gemini's dotenv loading. Because no managed-tool file
 is replaced, this selection requires no config backup.
+
+Gemini OAuth accounts use `VendorHome` material. Add writes an isolated
+`GEMINI_CLI_HOME` containing `oauth_creds.json`, `google_accounts.json`, and
+managed `settings.json` with `security.auth.selectedType` set to
+`oauth-personal`. Launch sets that home and `GOOGLE_GENAI_USE_GCA=true` on the
+child. This path does not write or swap the live `~/.gemini` tree. Listing may
+include a read-only on-disk OAuth row when live `oauth_creds.json` is present.
 
 ### Grok CLI
 

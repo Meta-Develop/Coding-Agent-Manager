@@ -75,23 +75,29 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   authorization-code exchange adapted from Antigravity Manager, using
   Gemini CLI's published installed-app client. Tokens are written only to
   an isolated `GEMINI_CLI_HOME` as `oauth_creds.json` plus
-  `google_accounts.json`. Launch sets that home and
+  `google_accounts.json` and managed `settings.json`
+  `security.auth.selectedType: oauth-personal`. Launch sets that home and
   `GOOGLE_GENAI_USE_GCA=true`. Forgetting an OAuth account retains the
-  home. The live `~/.gemini` tree is not written.
+  home. Listing may include a read-only `gemini-cli-on-disk` row when live
+  `oauth_creds.json` is present. The live `~/.gemini` tree is not written
+  or swapped.
 - Grok CLI managed accounts. Each vendor-written home stays under the
   application data directory; selection starts an app-owned child with
   `GROK_HOME` set to that home and inherited `GROK_AUTH_PATH` removed. The
   application never copies, rewrites, backs up, or deletes the managed
   `auth.json`, and forgetting an account retains its vendor home. See ADR 0009
   for the narrow plaintext-home exception.
-- Read-only Claude Code adapter: lists the on-disk identity by reading
-  `.credentials.json` and `~/.claude.json`. Switching is not implemented.
+- Claude Code isolated vendor-login add, crash-safe two-file switch of the
+  live `~/.claude` identity pair, and delete of a stored copy that does not
+  sign out live Claude. The Accounts page offers Sign in, Switch, and Delete
+  when the adapter advertises those capabilities. The id `claude-code-on-disk`
+  is reserved for the live identity. Vendor acceptance of a copied credential
+  remains untested.
 - Claude Code 2.1.212 identity write-path research marked `[verified-local]`:
   only top-level `claudeAiOauth` in `.credentials.json` and `oauthAccount` in
-  `~/.claude.json` are identity fields. Switching remains unimplemented until
-  the paired backup, durable recovery journal, fail-closed process and lock
-  checks, surgical field preservation, failure injection, and full `FR-2`
-  scope are implemented.
+  `~/.claude.json` are identity fields. The two-file switch uses a paired
+  backup, durable recovery journal, fail-closed process and lock checks, and
+  surgical field preservation.
 - Read-only Cursor CLI account listing through `cursor-agent status`, with
   masked identities and fail-closed parsing. Cursor remains experimental and
   advertises no mutating capability because its credential store and write
@@ -128,10 +134,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   frames, status chips, and button treatments. Labels, capability gates, and
   error distinctions are unchanged.
 - Accounts add flow is numbered and OAuth-first where the adapter can start
-  sign-in (Codex CLI, Grok CLI, Gemini CLI). Gemini titles the primary path
-  Sign in to Gemini CLI and keeps Import API key as a secondary control.
-  Claude Code says this application cannot start its sign-in yet. Cursor still
-  offers no add control (`NFR-8`).
+  sign-in (Claude Code, Codex CLI, Grok CLI, Gemini CLI). Gemini titles the
+  primary path Sign in to Gemini CLI and keeps Import API key as a secondary
+  control. Cursor still offers no add control (`NFR-8`).
 - Gemini account listings use the ordinary `listed` outcome. The Accounts page
   no longer describes Gemini as API-key-only or as lacking Google OAuth.
 - Provider sections on Accounts, Dashboard, and Providers use a left color
@@ -153,7 +158,8 @@ the live `auth.json`, and delete a stored copy. That switch is a local
 file replacement; it is not proven against the vendor. Gemini isolated-home
 OAuth, Gemini API-key, and Grok accounts can be selected for app-owned launches
 without changing each tool's default home. Live `~/.gemini` file-swap remains
-out of scope. Claude Code and Cursor remain read-only. The relay and
+out of scope. Claude Code rewrites the live `~/.claude` identity pair behind
+a restorable backup. Cursor remains read-only. The relay and
 router are implemented only to the boundaries recorded in `docs/ROADMAP.md`.
 
 [Unreleased]: https://github.com/Meta-Develop/Coding-Agent-Manager/commits/main

@@ -95,28 +95,30 @@ the implementation, but the real vendor/account checks have not been run.
 Satisfies: `FR-1`, `FR-2` for two more providers.
 
 - Claude Code: surgical read-modify-write of the identity fields in
-  `~/.claude.json`, preserving `projects`, `mcpServers`, and machine state,
-  atomic across both files.
+  `~/.claude.json` and `.credentials.json`, preserving `projects`,
+  `mcpServers`, and machine state, atomic across both files.
 - Gemini CLI: API-key accounts via `GEMINI_API_KEY`. OAuth add is in-app
-  Google loopback writing an isolated `GEMINI_CLI_HOME`. File-swap of the
-  live `~/.gemini` home remains out of scope.
+  Google loopback writing an isolated `GEMINI_CLI_HOME`, including managed
+  `oauth-personal` settings. Listing may include a read-only live
+  `gemini-cli-on-disk` row. File-swap of the live `~/.gemini` home remains
+  out of scope.
 
-M3 is partial. Gemini API-key account management is implemented through
-`CredentialStore` and non-secret launch selection. Gemini OAuth add writes
-only a managed home; launch sets `GEMINI_CLI_HOME` and
-`GOOGLE_GENAI_USE_GCA=true`. Neither path writes the live `~/.gemini` tree.
-
-Claude Code 2.1.212 research verified `[verified-local]` that the write identity
-is the top-level `claudeAiOauth` value in `.credentials.json` paired with the
-top-level `oauthAccount` value in `~/.claude.json`. The switch remains
-unimplemented. Its safety bar requires a paired backup, a durable journal with
+M3 is partial. Claude Code isolated add and the two-file switch are
+implemented with the safety bar: a paired backup, a durable journal with
 process-death recovery, fail-closed lock and process checks, surgical
 preservation of every other field, failure injection across write and recovery
-phases, and the full `FR-2` scope.
+phases, and the `FR-2` write scope. Vendor acceptance of a copied credential
+is untested.
+
+Gemini API-key account management is implemented through
+`CredentialStore` and non-secret launch selection. Gemini OAuth add writes
+only a managed home; launch sets `GEMINI_CLI_HOME` and
+`GOOGLE_GENAI_USE_GCA=true`. Listing can show the live on-disk OAuth identity
+as a read-only row. Neither path writes or swaps the live `~/.gemini` tree.
 
 **Exit criteria.** Claude Code switch preserves every machine-scoped field,
 proven by fixture diff. Gemini API-key switching works without touching a file.
-The Gemini criterion is met; the Claude criterion is not.
+Those criteria are met. Live Gemini file-swap remains out of scope.
 
 ---
 

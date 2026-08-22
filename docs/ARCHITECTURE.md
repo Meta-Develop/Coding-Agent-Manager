@@ -21,10 +21,11 @@ flowchart LR
   Tools -->|"optionally via base-URL override"| Core
 ```
 
-The legacy Codex path is the only implemented switch that replaces a live tool
-configuration file. Gemini and Grok selection changes only an app-owned child
-launch environment. Vendor login children may write isolated managed homes;
-the Rust core does not compose their credential documents.
+Codex CLI replaces live `auth.json`. Claude Code rewrites the live `~/.claude`
+identity fields. Both take a restorable backup first. Gemini and Grok
+selection changes only an app-owned child launch environment. Vendor login
+children may write isolated managed homes; the Rust core does not compose
+their credential documents.
 
 ## 2. Process and thread model
 
@@ -90,9 +91,9 @@ Every managed tool implements `ProviderAdapter`
 honour: `add-account`, `switch-account`, `delete-account`, and `launch-tool`.
 The Accounts page offers an action only when that list contains the matching
 value. Maturity cannot serve this purpose. All current adapters are
-experimental: Codex advertises `add-account`, `switch-account`, and
-`delete-account`; Grok and Gemini also advertise `launch-tool`; Claude and
-Cursor advertise none (`NFR-8`).
+experimental: Codex and Claude advertise `add-account`, `switch-account`, and
+`delete-account`; Grok and Gemini also advertise `launch-tool`; Cursor
+advertises none (`NFR-8`).
 
 Legacy `add_account` and `delete_account` must not write the live tool home.
 Legacy `activate_account` is the method that may replace a file the user's tool
@@ -122,14 +123,14 @@ special-casing.
 
 There are two activation paths:
 
-| Path               | Providers        | Effect                                                                                                                                   |
-| ------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Tool configuration | Codex CLI        | Replaces the live `auth.json` behind a restorable backup. This affects Codex started outside the application too.                        |
-| Launch environment | Grok, Gemini CLI | Persists non-secret selection and applies it only to an app-owned child. It does not change the account used by tools started elsewhere. |
+| Path               | Providers              | Effect                                                                                                                                                                  |
+| ------------------ | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tool configuration | Codex CLI, Claude Code | Codex replaces live `auth.json`. Claude rewrites the live `~/.claude` identity pair. Both snapshot first. This affects those tools started outside the application too. |
+| Launch environment | Grok, Gemini CLI       | Persists non-secret selection and applies it only to an app-owned child. It does not change the account used by tools started elsewhere.                                |
 
-Claude Code and Cursor are read-only. Grok and Gemini advertise `add-account`,
-`switch-account`, `delete-account`, and `launch-tool`; Codex advertises the
-first three.
+Cursor is read-only. Claude, Codex, Grok, and Gemini advertise `add-account`,
+`switch-account`, and `delete-account`; Grok and Gemini also advertise
+`launch-tool`.
 
 ### Managed-account layout
 
@@ -149,9 +150,10 @@ Codex stored homes are governed by
 [ADR 0008](adr/0008-vendor-written-auth-json-for-stored-codex-accounts.md).
 Grok homes are retained under the narrower
 [ADR 0009](adr/0009-launch-environment-account-selection.md) exception: the
-application never copies, rewrites, backs up, or deletes them. Gemini material
-is held by `CredentialStore`; its metadata contains no secret reference or
-value. Tests inject temporary roots so fixtures never use live application
+application never copies, rewrites, backs up, or deletes them. Gemini API-key
+material is held by `CredentialStore`. Gemini OAuth add writes an isolated
+vendor home under the application data directory and does not swap live
+`~/.gemini`. Tests inject temporary roots so fixtures never use live application
 data.
 
 ### Adding a legacy Codex stored account

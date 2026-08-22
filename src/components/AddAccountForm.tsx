@@ -6,9 +6,9 @@ const ACCOUNT_ID_MAX_LENGTH = 128
 
 /**
  * Adds a stored account for one adapter. The nickname is the account id.
- * Codex and Grok start vendor sign-in; Gemini opens the system browser for
- * Google sign-in, and can also import GEMINI_API_KEY from the native parent
- * process. This webview never accepts a secret.
+ * Codex, Claude, and Grok start vendor sign-in; Gemini opens the system
+ * browser for Google sign-in, and can also import GEMINI_API_KEY from the
+ * native parent process. This webview never accepts a secret.
  */
 export default function AddAccountForm({
   provider,
@@ -112,13 +112,18 @@ export default function AddAccountForm({
       </ol>
       {isGemini && (
         <div className="mt-6">
-          <h3 className="text-sm font-semibold tracking-tight">Import API key</h3>
-          <ol className="mt-3 list-decimal space-y-4 pl-5 text-sm" start={flow.steps.length + 2}>
+          <h3 className="text-sm font-semibold tracking-tight">
+            Import API key
+          </h3>
+          <ol
+            className="mt-3 list-decimal space-y-4 pl-5 text-sm"
+            start={flow.steps.length + 2}
+          >
             <li className="text-ink-muted">
               Start or restart this application with{' '}
-              <code className="font-mono">GEMINI_API_KEY</code> set in the native
-              parent process. Restart again with a different source key before
-              importing another account.
+              <code className="font-mono">GEMINI_API_KEY</code> set in the
+              native parent process. Restart again with a different source key
+              before importing another account.
             </li>
             <li>
               <button
@@ -178,8 +183,9 @@ function addFlow(provider: ProviderDescriptor): {
   }
 }
 
-/** Matches `account_id_is_safe` plus the Codex live-slot reservation. */
+/** Matches `account_id_is_safe` plus live on-disk slot reservations. */
 const CODEX_LIVE_SLOT_ID = 'codex-cli-on-disk'
+const CLAUDE_LIVE_SLOT_ID = 'claude-code-on-disk'
 
 function accountIdProblem(
   accountId: string,
@@ -193,6 +199,9 @@ function accountIdProblem(
   }
   if (providerId === 'codex-cli' && accountId === CODEX_LIVE_SLOT_ID) {
     return `\`${accountId}\` is reserved for the live on-disk Codex identity; choose a different name.`
+  }
+  if (providerId === 'claude-code' && accountId === CLAUDE_LIVE_SLOT_ID) {
+    return `\`${accountId}\` is reserved for the live on-disk Claude Code identity; choose a different name.`
   }
   return null
 }

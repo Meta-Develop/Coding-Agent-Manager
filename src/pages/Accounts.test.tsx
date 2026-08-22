@@ -57,39 +57,104 @@ describe('Accounts page', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('says Claude sign-in is unavailable and does not offer it', async () => {
+  it('offers Claude sign-in and switch that rewrites the live tool config', async () => {
+    const user = userEvent.setup()
+    const add = vi.fn(async () => undefined)
     stubInvoke({
-      providers: [
-        provider({
-          id: 'claude-code',
-          displayName: 'Claude Code',
-          vendor: 'Anthropic',
-          capabilities: [],
-        }),
-      ],
+      providers: [claudeProviderDescriptor()],
       listings: [
         listing('claude-code', {
           accounts: [
             account({
+              id: 'claude-code-on-disk',
+              providerId: 'claude-code',
+              label: 'Live Claude',
+              isActive: true,
+              isStored: false,
+            }),
+            account({
               id: 'work',
               providerId: 'claude-code',
               label: 'Work',
+              isStored: true,
             }),
           ],
         }),
       ],
+      add,
     })
     renderApp()
 
     await screen.findByRole('heading', { name: 'Claude Code' })
     expect(
-      screen.getByText('This application cannot start Claude sign-in yet.'),
-    ).toBeInTheDocument()
+      screen.queryByText(/cannot start Claude sign-in/i),
+    ).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('button', {
-        name: /Sign in|Add account|Import API key/i,
+      screen.queryByText(/OAuth is unavailable|cannot start.*sign-in/i),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/cannot switch accounts or select an account/i),
+    ).not.toBeInTheDocument()
+
+    const liveRow = screen.getByRole('row', { name: /Live Claude/ })
+    expect(
+      within(liveRow).queryByRole('button', {
+        name: /Switch|Delete|Forget|Launch|Select/,
       }),
     ).not.toBeInTheDocument()
+
+    await user.type(
+      screen.getByRole('textbox', { name: 'Nickname' }),
+      'personal',
+    )
+    await user.click(
+      screen.getByRole('button', { name: 'Sign in to Claude Code' }),
+    )
+    expect(add).toHaveBeenCalledWith('claude-code', 'personal', undefined)
+    expect(callsOf('add_account').at(-1)?.[1]).toEqual({
+      providerId: 'claude-code',
+      accountId: 'personal',
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Switch to Work' }))
+    const switchCopy = screen.getByText(/Switch Claude Code to Work\?/)
+    expect(switchCopy).toHaveTextContent(/rewrites the live tool config/i)
+    expect(switchCopy).toHaveTextContent(/restorable backup/i)
+    expect(switchCopy).not.toHaveTextContent(
+      /app-owned launch|launch environment/i,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Cancel switch' }))
+    await user.click(screen.getByRole('button', { name: 'Delete Work' }))
+    const deleteCopy = screen.getByText(
+      /Forget this application's stored copy of Work\?/,
+    )
+    expect(deleteCopy).toHaveTextContent(/Claude Code is not signed out/i)
+    expect(deleteCopy).toHaveTextContent(/own files are left untouched/i)
+  })
+
+  it('rejects the reserved Claude live-slot id before calling add_account', async () => {
+    const user = userEvent.setup()
+    const add = vi.fn(async () => undefined)
+    stubInvoke({
+      providers: [claudeProviderDescriptor()],
+      listings: [listing('claude-code', { accounts: [] })],
+      add,
+    })
+    renderApp()
+
+    await user.type(
+      await screen.findByRole('textbox', { name: 'Nickname' }),
+      'claude-code-on-disk',
+    )
+    await user.click(
+      screen.getByRole('button', { name: 'Sign in to Claude Code' }),
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      '`claude-code-on-disk` is reserved for the live on-disk Claude Code identity; choose a different name.',
+    )
+    expect(add).not.toHaveBeenCalled()
+    expect(callsOf('add_account')).toHaveLength(0)
   })
 
   it('offers Switch and Delete only on stored complete rows', async () => {
@@ -737,9 +802,7 @@ describe('Accounts page', () => {
     expect(
       screen.getByText(/browser completes Google sign-in/i),
     ).toHaveTextContent(/never takes a password/i)
-    expect(
-      screen.queryByLabelText(/password/i),
-    ).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/password/i)).not.toBeInTheDocument()
     await user.type(screen.getByRole('textbox', { name: 'Nickname' }), 'work')
     await user.click(
       screen.getByRole('button', { name: 'Sign in to Gemini CLI' }),
@@ -778,7 +841,9 @@ describe('Accounts page', () => {
     expect(explanation).toHaveTextContent(
       /never typed into or returned to this webview/i,
     )
-    expect(explanation).not.toHaveTextContent(/Google OAuth is not offered here/i)
+    expect(explanation).not.toHaveTextContent(
+      /Google OAuth is not offered here/i,
+    )
     await user.type(screen.getByRole('textbox', { name: 'Nickname' }), 'work')
     await user.click(
       screen.getByRole('button', { name: 'Import API key for Gemini CLI' }),
@@ -826,6 +891,56 @@ describe('Accounts page', () => {
       screen.getByRole('button', { name: 'Confirm forgetting Work' }),
     )
     expect(remove).toHaveBeenCalledWith('grok-cli', 'work')
+  })
+
+  it('lists a live Gemini OAuth row as a read-only on-disk identity', async () => {
+    stubInvoke({
+      providers: [launchProviderDescriptor('gemini-cli', 'Gemini CLI')],
+      listings: [
+        listing('gemini-cli', {
+          accounts: [
+            account({
+              id: 'gemini-cli-on-disk',
+              providerId: 'gemini-cli',
+              label: 'On-disk Gemini OAuth',
+              authKind: 'oauth',
+              isStored: false,
+            }),
+            account({
+              id: 'work',
+              providerId: 'gemini-cli',
+              label: 'Work',
+              authKind: 'oauth',
+              isStored: true,
+            }),
+          ],
+        }),
+      ],
+    })
+    renderApp()
+
+    const liveRow = await screen.findByRole('row', {
+      name: /On-disk Gemini OAuth/,
+    })
+    expect(within(liveRow).getByText('oauth')).toBeInTheDocument()
+    expect(
+      within(liveRow).queryByRole('button', {
+        name: /Select|Forget|Launch|Switch|Delete/,
+      }),
+    ).not.toBeInTheDocument()
+
+    const storedRow = screen.getByRole('row', { name: /^Work/ })
+    expect(
+      within(storedRow).getByRole('button', {
+        name: 'Select Work for app launch',
+      }),
+    ).toBeInTheDocument()
+    expect(
+      within(storedRow).getByRole('button', { name: 'Forget Work' }),
+    ).toBeInTheDocument()
+    expect(
+      within(storedRow).queryByRole('button', { name: /Launch Work/ }),
+    ).not.toBeInTheDocument()
   })
 
   it('warns that forgetting Gemini OAuth metadata retains the isolated home', async () => {
@@ -943,6 +1058,15 @@ function stubInvoke(options: {
       default:
         throw new Error(`unexpected command: ${String(command)}`)
     }
+  })
+}
+
+function claudeProviderDescriptor(): ProviderDescriptor {
+  return provider({
+    id: 'claude-code',
+    displayName: 'Claude Code',
+    vendor: 'Anthropic',
+    capabilities: ['add-account', 'switch-account', 'delete-account'],
   })
 }
 
