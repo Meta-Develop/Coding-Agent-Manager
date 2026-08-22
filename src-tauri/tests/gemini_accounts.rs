@@ -447,6 +447,14 @@ fn oauth_add_writes_isolated_home_and_delete_retains_it() {
     .expect("oauth add");
     let managed = fixture.data.join("accounts/gemini-cli/work");
     assert!(managed.join(".gemini/oauth_creds.json").is_file());
+    let settings: serde_json::Value = serde_json::from_slice(
+        &fs::read(managed.join(".gemini/settings.json")).expect("managed settings"),
+    )
+    .expect("settings json");
+    assert_eq!(
+        settings["security"]["auth"]["selectedType"],
+        "oauth-personal"
+    );
     assert_eq!(before, tree_bytes(&fixture.config));
     let accounts = adapter.list_accounts().expect("list");
     assert_eq!(accounts.len(), 1);
@@ -456,6 +464,10 @@ fn oauth_add_writes_isolated_home_and_delete_retains_it() {
         .expect("masked identity");
     assert!(masked.contains("***@"));
     assert!(!masked.contains("FAKE-user-0001"));
+    assert_eq!(
+        accounts[0].expires_at.as_deref(),
+        Some("2023-11-14T22:13:20Z")
+    );
     let surfaces = format!(
         "{accounts:?} {}",
         serde_json::to_string(&accounts).expect("json")
@@ -474,15 +486,52 @@ fn write_isolated_oauth(home: &Path) -> Result<()> {
     fs::create_dir_all(home.join(".gemini")).expect("oauth dir");
     fs::write(
         home.join(".gemini/oauth_creds.json"),
-        b"FAKE-gemini-oauth-creds-0001",
+        br#"{"access_token":"FAKE-gemini-oauth-access-0001","refresh_token":"FAKE-gemini-oauth-refresh-0001","expiry_date":1700000000000,"token_type":"Bearer"}"#,
     )
     .expect("creds");
     fs::write(
         home.join(".gemini/google_accounts.json"),
-        br#"{"active":"FAKE-user-0001@example.invalid","old":[]}"#,
+        br#"{"active":"FAKE-user-0001@example.invalid","old":["FAKE-old-0002@example.invalid"]}"#,
     )
     .expect("accounts");
     Ok(())
+}
+
+#[test]
+fn live_oauth_is_listed_read_only_and_old_is_not_a_second_account() {
+    let fixture = Fixture::new();
+    let adapter = fixture.adapter(None);
+    let live = fixture.config.join("home/.gemini");
+    fs::write(
+        live.join("oauth_creds.json"),
+        br#"{"access_token":"FAKE-live-oauth-access-0001","expiry_date":1700000000000}"#,
+    )
+    .expect("live creds");
+    fs::write(
+        live.join("google_accounts.json"),
+        br#"{"active":"FAKE-user-0001@example.invalid","old":["FAKE-old-0002@example.invalid"]}"#,
+    )
+    .expect("live accounts");
+    let before = tree_bytes(&fixture.config);
+    let accounts = adapter.list_accounts().expect("list");
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, "gemini-cli-on-disk");
+    assert!(!accounts[0].is_stored);
+    assert!(!accounts[0].is_selected_for_launch);
+    assert!(!accounts[0].is_active);
+    assert_eq!(accounts[0].expires_at, None);
+    let masked = accounts[0]
+        .masked_identity
+        .as_deref()
+        .expect("masked identity");
+    assert!(masked.contains("***@"));
+    assert!(!masked.contains("FAKE-user-0001"));
+    let surfaces = format!(
+        "{accounts:?} {}",
+        serde_json::to_string(&accounts).expect("json")
+    );
+    assert!(!surfaces.contains("FAKE-"));
+    assert_eq!(before, tree_bytes(&fixture.config));
 }
 
 fn complete_account(id: &str) -> StoredAccountMetadata {
