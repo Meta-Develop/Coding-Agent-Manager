@@ -17,6 +17,7 @@ use crate::model::{
     QuotaListOutcome, QuotaSnapshot, RelayStatus, RouteRule,
 };
 use crate::providers;
+use crate::providers::claude_code::ClaudeCodeAdapter;
 use crate::providers::codex_cli::CodexCliAdapter;
 use crate::providers::{ActivationMechanism, ProviderAdapter, StoredAccountRegistry};
 use crate::relay;
@@ -77,19 +78,23 @@ fn collect_account_listings(provider_id: Option<&str>) -> Vec<ProviderAccountLis
         .collect()
 }
 
-/// Codex can enumerate stored copies when the live document is damaged.
-/// The trait still returns `Result<Vec<Account>>`, so a listing+warning
-/// has to be recovered from the concrete type. Other adapters keep the
-/// existing `Ok` / `Err` mapping. A trait method that returned both
-/// would remove this branch.
+/// Codex and Claude can enumerate stored copies when the live document
+/// is damaged. The trait still returns `Result<Vec<Account>>`, so a
+/// listing+warning has to be recovered from the concrete type. Other
+/// adapters keep the existing `Ok` / `Err` mapping. A trait method that
+/// returned both would remove this branch.
 fn listing_for(adapter: &dyn ProviderAdapter) -> ProviderAccountList {
-    if adapter.id() == "codex-cli" {
-        return listing_from_detailed(
+    match adapter.id() {
+        "codex-cli" => listing_from_detailed(
             "codex-cli",
             CodexCliAdapter::default().list_accounts_detailed(),
-        );
+        ),
+        "claude-code" => listing_from_detailed(
+            "claude-code",
+            ClaudeCodeAdapter::default().list_accounts_detailed(),
+        ),
+        id => listing_from_result(id, adapter.list_accounts()),
     }
-    listing_from_result(adapter.id(), adapter.list_accounts())
 }
 
 fn listing_from_detailed(
