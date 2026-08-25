@@ -52,7 +52,7 @@ base64 = "0.22"
 # CSRF state for in-app Gemini Google OAuth. Already compiled in via
 # `chacha20poly1305`; this listing makes the crate usable without adding a
 # new dependency family.
-getrandom = "0.2"
+getrandom = "0.4"
 # Already in the tree via password-hash; this adds no new compiled code.
 subtle = "2"
 # RFC 3339 timestamps: backup file names (NFR-4) and `QuotaSnapshot.captured_at`.
