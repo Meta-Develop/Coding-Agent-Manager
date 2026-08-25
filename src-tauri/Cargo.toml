@@ -48,7 +48,7 @@ argon2 = { version = "0.5", features = ["std"] }
 chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 # Encodes the binary fields of the encrypted-file JSON envelope. Held at 0.22 to
 # match the version `keyring` already pulls in rather than adding a second copy.
-base64 = "0.22"
+base64 = "0.23"
 # CSRF state for in-app Gemini Google OAuth. Already compiled in via
 # `chacha20poly1305`; this listing makes the crate usable without adding a
 # new dependency family.
