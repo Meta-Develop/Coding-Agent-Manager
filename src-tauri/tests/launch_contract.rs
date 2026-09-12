@@ -281,7 +281,12 @@ fn core_sets_and_removes_exact_child_environment_without_mutating_its_own() {
         std::str::from_utf8(FAKE_SECRET).unwrap()
     );
     assert_eq!(observed["pathWasRemoved"], true);
-    assert_eq!(observed["cwd"], dir.path().to_string_lossy().as_ref());
+    let observed_cwd = PathBuf::from(observed["cwd"].as_str().expect("child cwd path"));
+    assert!(observed_cwd.is_absolute(), "child cwd must be absolute");
+    assert_eq!(
+        observed_cwd.canonicalize().expect("canonical child cwd"),
+        dir.path().canonicalize().expect("canonical expected cwd")
+    );
     assert!(std::env::var_os("CAM_PLAIN_SELECTION").is_none());
     assert!(std::env::var_os("CAM_SECRET_SELECTION").is_none());
     assert!(std::env::var_os("PATH").is_some());
