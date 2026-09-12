@@ -1459,7 +1459,8 @@ mod tests {
         fn managed_dir(&self, account_id: &str) -> PathBuf {
             self.data
                 .path()
-                .join("accounts/claude-code")
+                .join("accounts")
+                .join("claude-code")
                 .join(account_id)
         }
 

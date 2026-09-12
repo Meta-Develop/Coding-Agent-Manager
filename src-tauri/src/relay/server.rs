@@ -1256,7 +1256,7 @@ async fn upstream_response(
 
     let body = match collect_limited(upstream.bytes_stream(), MAX_RESPONSE_BYTES).await {
         Ok(body) => body,
-        Err(error) => return error,
+        Err(error) => return *error,
     };
     match state.translator.response(upstream_dialect, inbound, &body) {
         Ok(body) => build_response(status, headers, Body::from(body)),
@@ -1264,7 +1264,10 @@ async fn upstream_response(
     }
 }
 
-async fn collect_limited<S>(stream: S, limit: usize) -> std::result::Result<Vec<u8>, Response<Body>>
+async fn collect_limited<S>(
+    stream: S,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, Box<Response<Body>>>
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>>,
 {
@@ -1272,16 +1275,16 @@ where
     let mut output = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| {
-            json_error(
+            Box::new(json_error(
                 StatusCode::BAD_GATEWAY,
                 "relay upstream response stream failed",
-            )
+            ))
         })?;
         if output.len().saturating_add(chunk.len()) > limit {
-            return Err(json_error(
+            return Err(Box::new(json_error(
                 StatusCode::BAD_GATEWAY,
                 "relay upstream response body is too large to translate",
-            ));
+            )));
         }
         output.extend_from_slice(&chunk);
     }

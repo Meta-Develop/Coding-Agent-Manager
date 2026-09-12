@@ -615,7 +615,7 @@ fn check_active_sessions(home: &Path) -> Result<()> {
     validate_open_file_identity(&file, &path, "active session registry")?;
     let sessions: Vec<ActiveSession> = serde_json::from_slice(&bytes)
         .map_err(|_| config_write("active session registry is malformed"))?;
-    for session in sessions {
+    sessions.into_iter().try_for_each(|session| {
         if session.session_id.is_empty()
             || session.cwd.is_empty()
             || time::OffsetDateTime::parse(
@@ -631,21 +631,16 @@ fn check_active_sessions(home: &Path) -> Result<()> {
             ));
         }
         match pid_state(session.pid as u32) {
-            PidState::Live => {
-                return Err(config_write(
-                    "a Grok session recorded for this home is still active",
-                ))
-            }
+            PidState::Live => Err(config_write(
+                "a Grok session recorded for this home is still active",
+            )),
             #[cfg(target_os = "linux")]
-            PidState::Dead => {}
-            PidState::Unknown => {
-                return Err(config_write(
-                    "a Grok session PID could not be verified as stopped",
-                ))
-            }
+            PidState::Dead => Ok(()),
+            PidState::Unknown => Err(config_write(
+                "a Grok session PID could not be verified as stopped",
+            )),
         }
-    }
-    Ok(())
+    })
 }
 
 fn validate_open_file_identity(file: &File, path: &Path, label: &str) -> Result<()> {

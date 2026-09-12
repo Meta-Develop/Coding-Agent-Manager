@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -9,9 +10,11 @@ use coding_agent_manager_lib::model::{
     AuthKind, ProviderCapability, StoredAccountMaterial, StoredAccountMetadata, StoredAccountState,
 };
 use coding_agent_manager_lib::providers::gemini_cli::GeminiCliAdapter;
+#[cfg(unix)]
+use coding_agent_manager_lib::providers::spawn_launch;
 use coding_agent_manager_lib::providers::{
     add_managed_account_for, delete_managed_account, launch_spec_for, select_launch_account,
-    spawn_launch, ProviderAdapter, StoredAccountRegistry,
+    ProviderAdapter, StoredAccountRegistry,
 };
 use coding_agent_manager_lib::storage::{CredentialStore, Secret, SecretRef};
 
@@ -283,6 +286,8 @@ fn gemini_adapter_spawn_applies_exact_key_removals_and_cwd() {
     let expected_cwd = fixture
         .config
         .join("workspace")
+        .canonicalize()
+        .expect("canonical workspace")
         .to_string_lossy()
         .into_owned();
     let expected = format!(
