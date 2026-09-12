@@ -1,5 +1,9 @@
 # Architecture
 
+The proposed [MACO integration contract](MACO_INTEGRATION.md) defines a future
+manual account authority shared by headless and desktop entry points. It is not
+an implemented service; the sections below describe current behavior.
+
 ## 1. System context
 
 ```mermaid
