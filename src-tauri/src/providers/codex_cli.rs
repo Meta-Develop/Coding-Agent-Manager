@@ -1736,7 +1736,11 @@ mod tests {
         }
 
         fn managed_dir(&self, account_id: &str) -> std::path::PathBuf {
-            self.data.path().join("accounts/codex-cli").join(account_id)
+            self.data
+                .path()
+                .join("accounts")
+                .join("codex-cli")
+                .join(account_id)
         }
 
         fn digest(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
