@@ -105,7 +105,7 @@ fn binary_on_path_for_platform(binary: &str) -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        return binary_on_path(&format!("{binary}.exe"));
+        binary_on_path(&format!("{binary}.exe"))
     }
 
     #[cfg(not(target_os = "windows"))]
