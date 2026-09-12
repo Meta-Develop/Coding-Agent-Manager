@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 
 use coding_agent_manager_lib::model::{
@@ -9,9 +10,11 @@ use coding_agent_manager_lib::model::{
 };
 use coding_agent_manager_lib::paths::stored_accounts_path;
 use coding_agent_manager_lib::providers::grok_cli::GrokCliAdapter;
+#[cfg(unix)]
+use coding_agent_manager_lib::providers::spawn_launch;
 use coding_agent_manager_lib::providers::{
     add_managed_account, delete_managed_account, launch_spec_for, select_launch_account,
-    spawn_launch, ProviderAdapter, StoredAccountRegistry,
+    ProviderAdapter, StoredAccountRegistry,
 };
 use fs2::FileExt;
 
@@ -263,7 +266,8 @@ fn launched_child_receives_exact_derived_home_and_absolute_cwd() {
         lines[1], "",
         "inherited GROK_AUTH_PATH must be removed from the actual child"
     );
-    assert_eq!(lines[2], fixture.cwd.to_string_lossy());
+    let expected_cwd = fixture.cwd.canonicalize().expect("canonical workspace");
+    assert_eq!(lines[2], expected_cwd.to_string_lossy());
 }
 
 #[test]
