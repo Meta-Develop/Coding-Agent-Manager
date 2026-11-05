@@ -1,6 +1,6 @@
 name: GitHub Issue Intake
 
-"on":
+'on':
   issues:
     types: [opened, reopened]
 
